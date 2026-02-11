@@ -75,13 +75,15 @@ _ad_logger(1, locals())
 import sys
 _ad_logger(2, locals())
 import re
+_ad_logger(3, locals())
+import os
 
 
-_ad_logger(5, locals())
+_ad_logger(6, locals())
 def generate_header():
     """
     Returns the logic-gating code to be inserted at the top of the file.
-    _ad_logger(8, locals())
+    _ad_logger(9, locals())
     """
     return """
 # ==========================================
@@ -110,65 +112,61 @@ def _ad_logger(line_num, local_vars):
 # AUTO-DEBUGGER INJECTION END
 # ==========================================
 
-_ad_logger(36, locals())
+_ad_logger(37, locals())
 """
 
 
-_ad_logger(39, locals())
+_ad_logger(40, locals())
 def is_control_flow_continuation(line):
-    """
-    Checks if a line starts with keywords that cannot have code inserted
-    immediately before them (else, elif, except, finally).
-    _ad_logger(43, locals())
-    """
-    _ad_logger(44, locals())
+    _ad_logger(41, locals())
     stripped = line.strip()
-    # Regex to match 'else:', 'elif ...:', 'except ...:', 'finally:'
-    _ad_logger(46, locals())
+    # Matches else, elif, except, finally
+    _ad_logger(43, locals())
     pattern = r'^(else|elif|except|finally)\b'
-    _ad_logger(47, locals())
+    _ad_logger(44, locals())
     return bool(re.match(pattern, stripped))
 
 
-_ad_logger(50, locals())
+_ad_logger(47, locals())
 def is_safe_to_instrument(line):
-    """
-    Determines if the line is actual code vs comments/empty/decorators.
-    _ad_logger(53, locals())
-    """
-    _ad_logger(54, locals())
+    _ad_logger(48, locals())
     stripped = line.strip()
-    _ad_logger(55, locals())
-    if not stripped: return False  # Empty line
-    _ad_logger(56, locals())
-    if stripped.startswith('#'): return False  # Comment
-    _ad_logger(57, locals())
-    if stripped.startswith('@'): return False  # Decorator
-    if stripped.startswith('"""') or stripped.startswith("'''"): return False  # Docstrings
+    _ad_logger(49, locals())
+    if not stripped: return False
+    _ad_logger(50, locals())
+    if stripped.startswith('#'): return False
+    _ad_logger(51, locals())
+    if stripped.startswith('@'): return False
+    if stripped.startswith('"""') or stripped.startswith("'''"): return False
     return True
 
 
 def get_indentation(line):
-    """Returns the whitespace string at the start of the line."""
     return line[:len(line) - len(line.lstrip())]
 
 
 def instrument_file(input_path, output_path):
-    print(f"Processing: {input_path}...")
+    # Normalize paths for cross-platform compatibility
+    input_path = os.path.abspath(input_path)
+    output_path = os.path.abspath(output_path)
+
+    print(f"Reading from: {input_path}")
+    print(f"Writing to:   {output_path}")
+
+    if not os.path.exists(input_path):
+        print(f"\nError: The file '{input_path}' does not exist.")
+        return
 
     try:
         with open(input_path, 'r', encoding='utf-8') as f:
             lines = f.readlines()
-    except FileNotFoundError:
-        print(f"Error: File '{input_path}' not found.")
+    except Exception as e:
+        print(f"Error opening file: {e}")
         return
 
     instrumented_lines = []
-
-    # Add the header logic gates
     instrumented_lines.append(generate_header())
 
-    # Stack to track if we are inside a multi-line string
     in_multiline_string = False
 
     for i, line in enumerate(lines):
@@ -177,20 +175,14 @@ def instrument_file(input_path, output_path):
         indent = get_indentation(line)
         line_num = i + 1
 
-        # Toggle multiline string state
-        _ad_logger(92, locals())
+        _ad_logger(90, locals())
         if '"""' in stripped or "'''" in stripped:
             if stripped.count('"""') % 2 != 0 or stripped.count("'''") % 2 != 0:
                 in_multiline_string = not in_multiline_string
 
-        # LOGIC:
-        # 1. Ignore lines inside multi-line strings
-        # 2. Ignore comments/empty lines
-        # 3. DO NOT insert before 'else', 'elif', 'except', 'finally'
         if (not in_multiline_string and
                 is_safe_to_instrument(line) and
                 not is_control_flow_continuation(line)):
-            # Create the debug statement with matching indentation
             debug_stmt = f"{indent}_ad_logger({line_num}, locals())\n"
             instrumented_lines.append(debug_stmt)
 
@@ -199,24 +191,31 @@ def instrument_file(input_path, output_path):
     try:
         with open(output_path, 'w', encoding='utf-8') as f:
             f.writelines(instrumented_lines)
-        print(f"Success! Instrumented file saved to: {output_path}")
-        print("Run the new file to see debug output.")
+        print(f"\nSuccess! Debuggable file created at:\n{output_path}")
     except Exception as e:
         print(f"Error writing output: {e}")
 
 
 if __name__ == "__main__":
-    # Manual argument handling using sys.argv
+    # Check if user provided arguments
     if len(sys.argv) < 2:
-        print("Usage: python auto_debugger.py <input_file.py> [output_file.py]")
+        print("Usage: python auto_debugger.py <absolute_path_to_file.py> [optional_output_path.py]")
+        print("Error: No input file specified.")
         sys.exit(1)
 
-    input_file = sys.argv[1]
+    input_arg = sys.argv[1]
 
-    # If 2nd argument exists, use it as output name, otherwise default
+    # Generate Output Path logic
     if len(sys.argv) >= 3:
-        output_file = sys.argv[2]
+        # User specified output
+        output_arg = sys.argv[2]
     else:
-        output_file = "debug_output.py"
+        # Auto-generate output name in the SAME folder as the input
+        # e.g., C:/Users/Me/script.py -> C:/Users/Me/script_debug.py
+        dir_name = os.path.dirname(input_arg)
+        base_name = os.path.basename(input_arg)
+        name, ext = os.path.splitext(base_name)
+        new_name = f"{name}_debug{ext}"
+        output_arg = os.path.join(dir_name, new_name)
 
-    instrument_file(input_file, output_file)
+    instrument_file(input_arg, output_arg)
