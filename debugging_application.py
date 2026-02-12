@@ -303,6 +303,5 @@ def main():
     builder.expedited = (v_choice == 'y')
     process_project(path, mode, scope == '2', interval)
 
-
 if __name__ == "__main__":
     main()
