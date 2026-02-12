@@ -1,307 +1,132 @@
-import inspect
 import os
-import types
 import shutil
 import time
-import ast
+import re
+
+
+# ==========================================
+# 1. THE LOGGER HEADER (V4.0 - Global Control)
+# ==========================================
+def generate_header():
+    return """
+# ==========================================
+# STRICT RECURSIVE WRAPPER (V4.0)
+# ==========================================
 import datetime
-
-
-# ==========================================
-# 0. DUAL-VERBOSITY LOGGER (Build Phase)
-# ==========================================
-class BuilderLogger:
-    def __init__(self):
-        self.logs = []
-        self.target_dir = None
-        self.expedited = False
-
-    def log(self, message="", is_critical=False):
-        tagged_msg = f"[DEBUGGER_BUILD] {message}"
-        self.logs.append(tagged_msg)
-        if not self.expedited or is_critical:
-            print(tagged_msg)
-
-    def save_report(self):
-        if not self.target_dir: return
-        report_path = os.path.join(self.target_dir, "_DEBUG_BUILD_REPORT.txt")
-        header = f"\n{'=' * 60}\n FULL BUILD LOG: {datetime.datetime.now()}\n{'=' * 60}\n"
-        with open(report_path, 'a', encoding='utf-8') as f:
-            f.write(header + "\n".join(self.logs) + "\n")
-
-
-builder = BuilderLogger()
-
-
-# ==========================================
-# 1. THE LOGGER HEADER (Execution-Time Logic)
-# ==========================================
-def generate_header(include_globals=False, interval=10):
-    globals_flag = "True" if include_globals else "False"
-    return f"""
-# ==========================================
-# AUTO-DEBUGGER INJECTION START
-# ==========================================
-import inspect
+import sys
 import os
-import datetime
-import time
-import csv
 
-_AD_LAST_TABLE_FLUSH = time.time()
-_AD_TABLE_INTERVAL = {interval}
-_AD_BUFFER_OBJECTS = []
-_AD_BUFFER_VARS = []
+# --- GLOBAL SUPPRESSION FLAG ---
+# Set to False to disable all debugger overhead at runtime
+_AD_DEBUG_ACTIVE = True
 
-# --- SAFE STRINGIFIER (Prevents Freezing on Large Data) ---
-def _safe_repr(obj):
-    try:
-        if isinstance(obj, (int, float, bool, type(None))):
-            return str(obj)
-        if isinstance(obj, str):
-            return obj[:150] + "..." if len(obj) > 150 else obj
-        if isinstance(obj, (list, tuple, set, dict)):
-            return f"<{{type(obj).__name__}} len={{len(obj)}}>"
-        t_name = type(obj).__name__
-        if 'DataFrame' in t_name or 'Series' in t_name or 'ndarray' in t_name:
-            shape = getattr(obj, 'shape', '?')
-            return f"<{{t_name}} shape={{shape}}>"
-        val = repr(obj)
-        return val[:150] + "..." if len(val) > 150 else val
-    except:
-        return "<Unprintable Object>"
-
-def _ad_flush_tables():
-    global _AD_BUFFER_OBJECTS, _AD_BUFFER_VARS, _AD_LAST_TABLE_FLUSH
-    epoch = int(time.time())
-
-    # Write Vertical Object Table
-    if _AD_BUFFER_OBJECTS:
-        obj_file = f"DEBUGOBJECTS_{{epoch}}.csv"
-        try:
-            with open(obj_file, 'w', newline='', encoding='utf-8') as f:
-                writer = csv.writer(f)
-                writer.writerow(["DEBUG OBJECT at LINE, L", "VARIABLE NAME", "VARIABLE VALUE"])
-                writer.writerows(_AD_BUFFER_OBJECTS)
-        except: pass
-        _AD_BUFFER_OBJECTS = []
-
-    # Write Horizontal Variable Grid
-    if _AD_BUFFER_VARS:
-        var_file = f"DEBUGVARIABLESATLINE_{{epoch}}.csv"
-        try:
-            # Gather all unique keys across the buffer
-            all_keys = sorted(list(set(k for row in _AD_BUFFER_VARS for k in row.keys() if k != "_line_ref")))
-            with open(var_file, 'w', newline='', encoding='utf-8') as f:
-                writer = csv.writer(f)
-                writer.writerow([""] + all_keys)
-                for entry in _AD_BUFFER_VARS:
-                    row = [entry["_line_ref"]]
-                    for k in all_keys:
-                        row.append(entry.get(k, ""))
-                    writer.writerow(row)
-        except: pass
-        _AD_BUFFER_VARS = []
-
-    _AD_LAST_TABLE_FLUSH = time.time()
-
-def _ad_logger(target_line_num, local_vars, active=True):
-    global _AD_LAST_TABLE_FLUSH, _AD_BUFFER_OBJECTS, _AD_BUFFER_VARS
-    if not active: return
-    try:
-        frame = inspect.currentframe().f_back
-        code_obj = frame.f_code
-        filename = os.path.basename(code_obj.co_filename)
-        current_debug_line = frame.f_lineno 
-
-        vars_to_show = {{k: v for k, v in local_vars.items() if not k.startswith('_') and k not in ('local_vars', 'In', 'Out')}}
-        if {globals_flag}:
-            for k, v in frame.f_globals.items():
-                if k not in vars_to_show and not k.startswith('_'): 
-                    vars_to_show[k] = v
-
-        # --- PRE-PROCESS VALUES WITH SAFETY CHECK ---
-        safe_vars = {{k: _safe_repr(v) for k, v in vars_to_show.items()}}
-        line_label = f"Line {{target_line_num}}"
-
-        # 1. Store for Vertical Table
-        for k, v_str in safe_vars.items():
-            _AD_BUFFER_OBJECTS.append([line_label, k, v_str])
-
-        # 2. Store for Horizontal Grid
-        var_entry = safe_vars.copy()
-        var_entry["_line_ref"] = line_label
-        _AD_BUFFER_VARS.append(var_entry)
-
-        # 3. TEXT LOGGING (Console + Combined File)
-        summary_parts = [f"{{k}}={{v}}" for k, v in safe_vars.items()]
-        log_msg = f"[DEBUGGER] {{filename}}:{{current_debug_line}} | PRE-EXEC line {{target_line_num}} | Vars: {{', '.join(summary_parts)}}"
-
-        # Print to Console
-        print(f"\\n{{log_msg}}")
-
-        # Write to File
-        timestamped_msg = f"[{{datetime.datetime.now()}}] {{log_msg}}\\n"
-        for fname in ["_DEBUG_TRACE_ONLY.txt", "_DEBUG_SUMMARY_COMBINED.txt"]:
-             with open(fname, "a", encoding="utf-8") as f:
-                f.write(timestamped_msg)
-
-        # 4. Check for Flush Interval
-        if (time.time() - _AD_LAST_TABLE_FLUSH >= _AD_TABLE_INTERVAL) or (len(_AD_BUFFER_OBJECTS) > 5000):
-            _ad_flush_tables()
-
-    except Exception as e:
-        print(f"[DEBUGGER INTERNAL ERROR] {{e}}")
-
-def _ad_script_output(*args, **kwargs):
-    msg = " ".join(map(str, args))
+def _ad_script_output(msg):
+    if not _AD_DEBUG_ACTIVE: return
     timestamp = datetime.datetime.now().strftime("%Y-%m-%d %H:%M:%S")
-    tagged_msg = f"[SCRIPTATLARGE] [{{timestamp}}] {{msg}}\\n"
-
-    # Print to Console
-    print(tagged_msg.strip())
-
-    # Write to File
+    formatted = f"[DEBUG_ERROR] [{timestamp}] {msg}"
+    print(formatted)
     try:
-        for fname in ["_DEBUG_SCRIPT_ONLY.txt", "_DEBUG_SUMMARY_COMBINED.txt"]:
-            with open(fname, "a", encoding="utf-8") as f:
-                f.write(tagged_msg)
+        with open("_DEBUG_CRASH_LOG.txt", "a", encoding="utf-8") as f:
+            f.write(formatted + "\\n")
     except: pass
-# ==========================================
-# AUTO-DEBUGGER INJECTION END
 # ==========================================
 """
 
 
 # ==========================================
-# 2. INJECTION LOGIC (Deep Tagging)
+# 2. THE PRE-PROCESSOR (Strips Interference)
 # ==========================================
-def inject_into_file(file_path, mode_choice, include_globals, interval):
+def clean_source(source):
+    # Removes all docstrings and single-line comments immediately
+    pattern = r'(\"\"\"[\s\S]*?\"\"\"|\'\'\'[\s\S]*?\'\'\'|#.*$)'
+    return re.sub(pattern, "", source, flags=re.MULTILINE)
+
+
+# ==========================================
+# 3. THE INJECTION ENGINE (With Depth Limit)
+# ==========================================
+def inject_into_file(file_path, max_depth=3):
     try:
         with open(file_path, 'r', encoding='utf-8') as f:
-            lines = f.readlines()
+            raw_content = f.read()
 
-        proposed_content = [generate_header(include_globals, interval)]
+        # Phase 1: Clean the slate
+        clean_content = clean_source(raw_content)
+        lines = clean_content.splitlines()
+
+        new_content = [generate_header()]
         bracket_level = 0
-        in_multiline_string = False
 
         for i, line in enumerate(lines):
             stripped = line.strip()
-            indent = line[:len(line) - len(line.lstrip())]
+            if not stripped: continue
 
-            # --- CHANGE: AUTO-TAG SCRIPT OUTPUT ---
-            if "print(" in line:
-                line = line.replace("print(", "_ad_script_output(").replace("my_print(", "_ad_script_output(")
+            indent_str = line[:len(line) - len(line.lstrip())]
+            # Calculate depth based on 4-space indentation standard
+            current_depth = len(indent_str) // 4
 
-            # --- TRACE INJECTION LOGIC ---
-            is_safe_to_start = (bracket_level == 0 and not in_multiline_string)
-            if '"""' in stripped or "'''" in stripped:
-                if (stripped.count('"""') % 2 != 0) or (stripped.count("'''") % 2 != 0):
-                    in_multiline_string = not in_multiline_string
+            # --- BRACKET INTEGRITY CHECK ---
+            prev_level = bracket_level
+            bracket_level += (line.count('(') + line.count('[') + line.count('{'))
+            bracket_level -= (line.count(')') + line.count(']') + line.count('}'))
 
-            bracket_level += (stripped.count('(') + stripped.count('[') + stripped.count('{'))
-            bracket_level -= (stripped.count(')') + stripped.count(']') + stripped.count('}'))
+            structural_keywords = (
+                'def ', 'class ', 'if ', 'elif ', 'else:', 'for ', 'while ',
+                'with ', 'try:', 'except', 'finally:', '@', 'import ', 'from ',
+                'return ', 'yield ', 'break', 'continue', 'pass'
+            )
+            is_structural = any(stripped.startswith(k) for k in structural_keywords)
 
-            is_comment = stripped.startswith('#')
-            is_block_continuation = any(
-                stripped.startswith(w) for w in ('elif ', 'else:', 'except', 'finally:', ')', ']', '}'))
-            is_decorator = stripped.startswith('@')
+            # --- THE "STRICT" WRAP RULE ---
+            # Added Depth Limit: Only wrap if depth <= max_depth
+            if (prev_level == 0 and bracket_level == 0 and
+                    not is_structural and current_depth <= max_depth):
 
-            should_inject = False
-            if is_safe_to_start and stripped and not is_comment and not is_block_continuation and not is_decorator:
-                if mode_choice == '1':
-                    should_inject = True
-                elif mode_choice == '2' and "# DEBUG" in line:
-                    should_inject = True
-
-            if should_inject:
-                proposed_content.append(f"{indent}_ad_logger({i + 1}, locals())\n")
-
-            proposed_content.append(line)
-
-        # Add final flush to ensure data isn't lost on script exit
-        proposed_content.append("\n_ad_flush_tables()\n")
-
-        full_script = "".join(proposed_content)
-        ast.parse(full_script)  # Safety check
+                if stripped in (")", "]", "}", "),", "],", "},"):
+                    new_content.append(line)
+                else:
+                    new_content.append(f"{indent_str}try:")
+                    new_content.append(f"{indent_str}    {stripped}")
+                    new_content.append(f"{indent_str}except Exception as e:")
+                    new_content.append(f"{indent_str}    _ad_script_output(f'Line {i + 1} Failed: {{e}}')")
+            else:
+                new_content.append(line)
 
         with open(file_path, 'w', encoding='utf-8') as f:
-            f.write(full_script)
+            f.write("\n".join(new_content))
         return True
     except Exception as e:
-        builder.log(f"[ERROR] Logic failure in {file_path}: {e}", is_critical=True)
+        print(f"Injection Failure: {e}")
         return False
 
 
 # ==========================================
-# 3. PROJECT PROCESSING
+# 4. RUNNER
 # ==========================================
-def process_project(source_dir, mode_choice, include_globals, interval):
-    dir_name = os.path.basename(os.path.normpath(source_dir))
-    target_dir = os.path.join(os.path.dirname(os.path.normpath(source_dir)),
-                              f"{dir_name}_{int(time.time())}_debug_build")
-    builder.target_dir = target_dir
+def process_project(source_dir, max_depth):
+    target_dir = source_dir.rstrip('\\/') + f"_DEBUG_FINAL_{int(time.time())}"
     if not os.path.exists(target_dir): os.makedirs(target_dir)
 
-    py_files = []
     for root, _, files in os.walk(source_dir):
         if any(x in root for x in ['venv', '.git', '__pycache__']): continue
         for file in files:
             if file.endswith(".py"):
-                source_path = os.path.join(root, file)
-                rel_path = os.path.relpath(source_path, source_dir)
-                target_path = os.path.join(target_dir, rel_path)
-                os.makedirs(os.path.dirname(target_path), exist_ok=True)
-                shutil.copy2(source_path, target_path)
-                py_files.append((rel_path, target_path))
+                src = os.path.join(root, file)
+                rel = os.path.relpath(src, source_dir)
+                dst = os.path.join(target_dir, rel)
+                os.makedirs(os.path.dirname(dst), exist_ok=True)
+                shutil.copy2(src, dst)
+                inject_into_file(dst, max_depth)
+                print(f"Wrapped (Max Depth {max_depth}): {rel}")
 
-    for idx, (rel, _) in enumerate(py_files):
-        print(f"[{idx + 1}] {rel}")
-
-    selection = input("\nFiles to inject (e.g. '1, 3-5', 'all'): ").strip()
-    indices = []
-    try:
-        if selection.lower() == 'all':
-            indices = list(range(len(py_files)))
-        else:
-            for part in selection.split(','):
-                part = part.strip()
-                if '-' in part:
-                    s, e = map(int, part.split('-'))
-                    indices.extend(range(s - 1, e))
-                else:
-                    indices.append(int(part) - 1)
-    except:
-        print("Invalid selection. Exiting.")
-        return
-
-    builder.log("\n--- Starting Injection Phase ---", is_critical=True)
-    for idx in indices:
-        name, path = py_files[idx]
-        builder.log(f"Processing: {name}")
-        status = "SUCCESS" if inject_into_file(path, mode_choice, include_globals, interval) else "FAILED"
-        builder.log(f"[{status}] {name}", is_critical=True)
-
-    builder.save_report()
-    builder.log(f"\nTriple-Log Build Complete at: {target_dir}", is_critical=True)
-
-
-def main():
-    print("--- Isolated Resilient Debugger v5.0 (Full Stream + CSV) ---")
-    path = input("Project Path: ").strip().strip('"').strip("'")
-    if not os.path.isdir(path): return
-
-    mode = input("\n1.Full | 2.Selective: ").strip()
-    scope = input("1.Local | 2.Global+Local: ").strip()
-    v_choice = input("Expedited Console Readout? (y/n): ").strip().lower()
-
-    try:
-        interval = int(input("Seconds between CSV table outputs: ").strip())
-    except:
-        interval = 10
-
-    builder.expedited = (v_choice == 'y')
-    process_project(path, mode, scope == '2', interval)
 
 if __name__ == "__main__":
-    main()
+    path = input("Project Path: ").strip().strip('"')
+    try:
+        depth = int(input("Max Recursion Depth (Indentation Levels) to wrap (default 3): ") or 3)
+    except:
+        depth = 3
+
+    if os.path.isdir(path):
+        process_project(path, depth)
+        print("\nBuild Complete. Use '_AD_DEBUG_ACTIVE = False' in header to suppress logs.")
