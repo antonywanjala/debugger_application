@@ -36,7 +36,7 @@ builder = BuilderLogger()
 # ==========================================
 # 1. THE LOGGER HEADER (Execution-Time Logic)
 # ==========================================
-def generate_header(include_globals=False, interval=0):
+def generate_header(include_globals=False, interval=10):
     globals_flag = "True" if include_globals else "False"
     return f"""
 # ==========================================
@@ -44,15 +44,69 @@ def generate_header(include_globals=False, interval=0):
 # ==========================================
 import inspect
 import os
-import types
 import datetime
 import time
+import csv
 
-_AD_LAST_PUBLISH = 0
-_AD_INTERVAL = {interval}
+_AD_LAST_TABLE_FLUSH = time.time()
+_AD_TABLE_INTERVAL = {interval}
+_AD_BUFFER_OBJECTS = []
+_AD_BUFFER_VARS = []
+
+# --- SAFE STRINGIFIER (Prevents Freezing on Large Data) ---
+def _safe_repr(obj):
+    try:
+        if isinstance(obj, (int, float, bool, type(None))):
+            return str(obj)
+        if isinstance(obj, str):
+            return obj[:150] + "..." if len(obj) > 150 else obj
+        if isinstance(obj, (list, tuple, set, dict)):
+            return f"<{{type(obj).__name__}} len={{len(obj)}}>"
+        t_name = type(obj).__name__
+        if 'DataFrame' in t_name or 'Series' in t_name or 'ndarray' in t_name:
+            shape = getattr(obj, 'shape', '?')
+            return f"<{{t_name}} shape={{shape}}>"
+        val = repr(obj)
+        return val[:150] + "..." if len(val) > 150 else val
+    except:
+        return "<Unprintable Object>"
+
+def _ad_flush_tables():
+    global _AD_BUFFER_OBJECTS, _AD_BUFFER_VARS, _AD_LAST_TABLE_FLUSH
+    epoch = int(time.time())
+
+    # Write Vertical Object Table
+    if _AD_BUFFER_OBJECTS:
+        obj_file = f"DEBUGOBJECTS_{{epoch}}.csv"
+        try:
+            with open(obj_file, 'w', newline='', encoding='utf-8') as f:
+                writer = csv.writer(f)
+                writer.writerow(["DEBUG OBJECT at LINE, L", "VARIABLE NAME", "VARIABLE VALUE"])
+                writer.writerows(_AD_BUFFER_OBJECTS)
+        except: pass
+        _AD_BUFFER_OBJECTS = []
+
+    # Write Horizontal Variable Grid
+    if _AD_BUFFER_VARS:
+        var_file = f"DEBUGVARIABLESATLINE_{{epoch}}.csv"
+        try:
+            # Gather all unique keys across the buffer
+            all_keys = sorted(list(set(k for row in _AD_BUFFER_VARS for k in row.keys() if k != "_line_ref")))
+            with open(var_file, 'w', newline='', encoding='utf-8') as f:
+                writer = csv.writer(f)
+                writer.writerow([""] + all_keys)
+                for entry in _AD_BUFFER_VARS:
+                    row = [entry["_line_ref"]]
+                    for k in all_keys:
+                        row.append(entry.get(k, ""))
+                    writer.writerow(row)
+        except: pass
+        _AD_BUFFER_VARS = []
+
+    _AD_LAST_TABLE_FLUSH = time.time()
 
 def _ad_logger(target_line_num, local_vars, active=True):
-    global _AD_LAST_PUBLISH
+    global _AD_LAST_TABLE_FLUSH, _AD_BUFFER_OBJECTS, _AD_BUFFER_VARS
     if not active: return
     try:
         frame = inspect.currentframe().f_back
@@ -60,64 +114,58 @@ def _ad_logger(target_line_num, local_vars, active=True):
         filename = os.path.basename(code_obj.co_filename)
         current_debug_line = frame.f_lineno 
 
-        include_globals = {globals_flag}
-        vars_to_show = local_vars.copy()
-        if include_globals:
+        vars_to_show = {{k: v for k, v in local_vars.items() if not k.startswith('_') and k not in ('local_vars', 'In', 'Out')}}
+        if {globals_flag}:
             for k, v in frame.f_globals.items():
-                if k not in vars_to_show: vars_to_show[k] = v
+                if k not in vars_to_show and not k.startswith('_'): 
+                    vars_to_show[k] = v
 
-        summary_parts = []
-        # Optimization: Prevent "Stuck" behavior on large objects
-        primitives = (int, float, str, bool, type(None))
-        containers = (list, dict, set, tuple)
+        # --- PRE-PROCESS VALUES WITH SAFETY CHECK ---
+        safe_vars = {{k: _safe_repr(v) for k, v in vars_to_show.items()}}
+        line_label = f"Line {{target_line_num}}"
 
-        for k, v in vars_to_show.items():
-            if k.startswith('_') or k in ('local_vars', 'In', 'Out'): continue
-            try:
-                if isinstance(v, primitives):
-                    val_repr = repr(v)
-                    summary_parts.append(f"{{k}}={{val_repr[:60]}}")
-                elif isinstance(v, containers):
-                    summary_parts.append(f"{{k}}({{type(v).__name__}} len={{len(v)}})")
-                else:
-                    summary_parts.append(f"{{k}}({{type(v).__name__}})")
-            except: continue
+        # 1. Store for Vertical Table
+        for k, v_str in safe_vars.items():
+            _AD_BUFFER_OBJECTS.append([line_label, k, v_str])
 
+        # 2. Store for Horizontal Grid
+        var_entry = safe_vars.copy()
+        var_entry["_line_ref"] = line_label
+        _AD_BUFFER_VARS.append(var_entry)
+
+        # 3. TEXT LOGGING (Console + Combined File)
+        summary_parts = [f"{{k}}={{v}}" for k, v in safe_vars.items()]
         log_msg = f"[DEBUGGER] {{filename}}:{{current_debug_line}} | PRE-EXEC line {{target_line_num}} | Vars: {{', '.join(summary_parts)}}"
-        print("\\n" + log_msg)
 
+        # Print to Console
+        print(f"\\n{{log_msg}}")
+
+        # Write to File
         timestamped_msg = f"[{{datetime.datetime.now()}}] {{log_msg}}\\n"
-
-        # Route to Trace and Combined
         for fname in ["_DEBUG_TRACE_ONLY.txt", "_DEBUG_SUMMARY_COMBINED.txt"]:
-            with open(fname, "a", encoding="utf-8") as f:
+             with open(fname, "a", encoding="utf-8") as f:
                 f.write(timestamped_msg)
-                f.flush()
 
-        # Intermittent Summary Publication
-        if _AD_INTERVAL > 0:
-            current_now = time.time()
-            if current_now - _AD_LAST_PUBLISH >= _AD_INTERVAL:
-                pub_filename = f"DEBUG_SUMMARY_{{int(current_now)}}.txt"
-                with open(pub_filename, "w", encoding="utf-8") as f:
-                    f.write(f"--- [DEBUGGER] INTERMITTENT SUMMARY: {{datetime.datetime.now()}} ---\\n")
-                    f.write(log_msg)
-                _AD_LAST_PUBLISH = current_now
-    except: pass 
+        # 4. Check for Flush Interval
+        if (time.time() - _AD_LAST_TABLE_FLUSH >= _AD_TABLE_INTERVAL) or (len(_AD_BUFFER_OBJECTS) > 5000):
+            _ad_flush_tables()
+
+    except Exception as e:
+        print(f"[DEBUGGER INTERNAL ERROR] {{e}}")
 
 def _ad_script_output(*args, **kwargs):
-    # This captures all original print() and my_print() calls
     msg = " ".join(map(str, args))
     timestamp = datetime.datetime.now().strftime("%Y-%m-%d %H:%M:%S")
     tagged_msg = f"[SCRIPTATLARGE] [{{timestamp}}] {{msg}}\\n"
 
+    # Print to Console
     print(tagged_msg.strip())
+
+    # Write to File
     try:
-        # Route to Script-Only and Combined
         for fname in ["_DEBUG_SCRIPT_ONLY.txt", "_DEBUG_SUMMARY_COMBINED.txt"]:
             with open(fname, "a", encoding="utf-8") as f:
                 f.write(tagged_msg)
-                f.flush()
     except: pass
 # ==========================================
 # AUTO-DEBUGGER INJECTION END
@@ -142,7 +190,6 @@ def inject_into_file(file_path, mode_choice, include_globals, interval):
             indent = line[:len(line) - len(line.lstrip())]
 
             # --- CHANGE: AUTO-TAG SCRIPT OUTPUT ---
-            # Replaces original prints with our routed logger
             if "print(" in line:
                 line = line.replace("print(", "_ad_script_output(").replace("my_print(", "_ad_script_output(")
 
@@ -171,6 +218,9 @@ def inject_into_file(file_path, mode_choice, include_globals, interval):
                 proposed_content.append(f"{indent}_ad_logger({i + 1}, locals())\n")
 
             proposed_content.append(line)
+
+        # Add final flush to ensure data isn't lost on script exit
+        proposed_content.append("\n_ad_flush_tables()\n")
 
         full_script = "".join(proposed_content)
         ast.parse(full_script)  # Safety check
@@ -237,7 +287,7 @@ def process_project(source_dir, mode_choice, include_globals, interval):
 
 
 def main():
-    print("--- Isolated Resilient Debugger v3.3 (Deep Print Catch) ---")
+    print("--- Isolated Resilient Debugger v5.0 (Full Stream + CSV) ---")
     path = input("Project Path: ").strip().strip('"').strip("'")
     if not os.path.isdir(path): return
 
@@ -246,9 +296,9 @@ def main():
     v_choice = input("Expedited Console Readout? (y/n): ").strip().lower()
 
     try:
-        interval = int(input("Seconds between Intermittent DEBUG_SUMMARY publications (0 for none): ").strip())
+        interval = int(input("Seconds between CSV table outputs: ").strip())
     except:
-        interval = 0
+        interval = 10
 
     builder.expedited = (v_choice == 'y')
     process_project(path, mode, scope == '2', interval)
