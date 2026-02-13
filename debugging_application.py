@@ -1,23 +1,21 @@
 import os
 import shutil
+import datetime
 import time
-import re
 
 
 # ==========================================
-# 1. THE LOGGER HEADER (V4.0 - Global Control)
+# 1. THE LOGGER HEADER (V4.2 - Global Control)
 # ==========================================
 def generate_header():
     return """
 # ==========================================
-# STRICT RECURSIVE WRAPPER (V4.0)
+# STRICT RECURSIVE WRAPPER (V4.2)
 # ==========================================
 import datetime
 import sys
 import os
 
-# --- GLOBAL SUPPRESSION FLAG ---
-# Set to False to disable all debugger overhead at runtime
 _AD_DEBUG_ACTIVE = True
 
 def _ad_script_output(msg):
@@ -34,23 +32,87 @@ def _ad_script_output(msg):
 
 
 # ==========================================
-# 2. THE PRE-PROCESSOR (Strips Interference)
+# 2. THE PRE-PROCESSOR (Context-Aware Machine)
 # ==========================================
 def clean_source(source):
-    # Removes all docstrings and single-line comments immediately
-    pattern = r'(\"\"\"[\s\S]*?\"\"\"|\'\'\'[\s\S]*?\'\'\'|#.*$)'
-    return re.sub(pattern, "", source, flags=re.MULTILINE)
+    """
+    Strips comments and docstrings.
+    Crucially: Preserves triple-quoted strings assigned to variables.
+    """
+    result = []
+    i = 0
+    n = len(source)
+    quote_type = None
+    in_comment = False
+
+    # Track the last non-whitespace character to detect assignments
+    last_valuable_char = ""
+
+    while i < n:
+        char = source[i]
+
+        if in_comment:
+            if char == '\n':
+                in_comment = False
+                result.append('\n')
+            i += 1
+            continue
+
+        if quote_type:
+            if quote_type in ('"""', "'''"):
+                if source[i:i + 3] == quote_type:
+                    # Keep closing quotes if we are in 'preserve' mode
+                    if preserve_triple:
+                        result.append(quote_type)
+                    quote_type = None
+                    i += 3
+                    continue
+                else:
+                    if preserve_triple:
+                        result.append(char)
+                    i += 1
+            else:
+                # Normal single-line string handling
+                if char == quote_type and (i == 0 or source[i - 1] != '\\'):
+                    result.append(char)
+                    quote_type = None
+                else:
+                    result.append(char)
+                i += 1
+            continue
+
+        # Detect Start of Transitions
+        if source[i:i + 3] in ('"""', "'''"):
+            quote_type = source[i:i + 3]
+            # If the last character was '=', this is data, not a docstring
+            preserve_triple = (last_valuable_char == '=')
+            if preserve_triple:
+                result.append(quote_type)
+            i += 3
+        elif char in ('"', "'"):
+            quote_type = char
+            result.append(char)
+            i += 1
+        elif char == '#':
+            in_comment = True
+            i += 1
+        else:
+            if not char.isspace():
+                last_valuable_char = char
+            result.append(char)
+            i += 1
+
+    return "".join(result)
 
 
 # ==========================================
-# 3. THE INJECTION ENGINE (With Depth Limit)
+# 3. THE INJECTION ENGINE
 # ==========================================
 def inject_into_file(file_path, max_depth=3):
     try:
         with open(file_path, 'r', encoding='utf-8') as f:
             raw_content = f.read()
 
-        # Phase 1: Clean the slate
         clean_content = clean_source(raw_content)
         lines = clean_content.splitlines()
 
@@ -61,24 +123,22 @@ def inject_into_file(file_path, max_depth=3):
             stripped = line.strip()
             if not stripped: continue
 
-            indent_str = line[:len(line) - len(line.lstrip())]
-            # Calculate depth based on 4-space indentation standard
-            current_depth = len(indent_str) // 4
+            indent_len = len(line) - len(line.lstrip())
+            indent_str = line[:indent_len]
+            current_depth = indent_len // 4
 
-            # --- BRACKET INTEGRITY CHECK ---
             prev_level = bracket_level
             bracket_level += (line.count('(') + line.count('[') + line.count('{'))
             bracket_level -= (line.count(')') + line.count(']') + line.count('}'))
 
+            # Improved structural check: don't wrap if line ends with ':' or starts with keyword
             structural_keywords = (
                 'def ', 'class ', 'if ', 'elif ', 'else:', 'for ', 'while ',
                 'with ', 'try:', 'except', 'finally:', '@', 'import ', 'from ',
                 'return ', 'yield ', 'break', 'continue', 'pass'
             )
-            is_structural = any(stripped.startswith(k) for k in structural_keywords)
+            is_structural = any(stripped.startswith(k) for k in structural_keywords) or stripped.endswith(':')
 
-            # --- THE "STRICT" WRAP RULE ---
-            # Added Depth Limit: Only wrap if depth <= max_depth
             if (prev_level == 0 and bracket_level == 0 and
                     not is_structural and current_depth <= max_depth):
 
@@ -96,7 +156,7 @@ def inject_into_file(file_path, max_depth=3):
             f.write("\n".join(new_content))
         return True
     except Exception as e:
-        print(f"Injection Failure: {e}")
+        print(f"Injection Error: {e}")
         return False
 
 
@@ -104,8 +164,15 @@ def inject_into_file(file_path, max_depth=3):
 # 4. RUNNER
 # ==========================================
 def process_project(source_dir, max_depth):
-    target_dir = source_dir.rstrip('\\/') + f"_DEBUG_FINAL_{int(time.time())}"
-    if not os.path.exists(target_dir): os.makedirs(target_dir)
+    ts_seconds = int(time.time())
+    ts_readable = datetime.datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+    target_dir = source_dir.rstrip('\\/') + f"_DEBUG_FINAL_{ts_seconds}"
+
+    if not os.path.exists(target_dir):
+        os.makedirs(target_dir)
+
+    print(f"\n[START] Build initiated at {ts_readable}")
+    print(f"[INFO] Target: {target_dir}\n")
 
     for root, _, files in os.walk(source_dir):
         if any(x in root for x in ['venv', '.git', '__pycache__']): continue
@@ -117,16 +184,20 @@ def process_project(source_dir, max_depth):
                 os.makedirs(os.path.dirname(dst), exist_ok=True)
                 shutil.copy2(src, dst)
                 inject_into_file(dst, max_depth)
-                print(f"Wrapped (Max Depth {max_depth}): {rel}")
+                print(f"  Processed: {rel}")
+
+    print(f"\n[FINISH] Build Complete")
+    print(f"Folder Timestamp: {ts_seconds}")
 
 
 if __name__ == "__main__":
     path = input("Project Path: ").strip().strip('"')
     try:
-        depth = int(input("Max Recursion Depth (Indentation Levels) to wrap (default 3): ") or 3)
+        depth = int(input("Max Depth (default 3): ") or 3)
     except:
         depth = 3
 
     if os.path.isdir(path):
         process_project(path, depth)
-        print("\nBuild Complete. Use '_AD_DEBUG_ACTIVE = False' in header to suppress logs.")
+    else:
+        print("Invalid path.")
