@@ -44,24 +44,19 @@ def clean_source(source):
     n = len(source)
     quote_type = None
     in_comment = False
-
-    # Track the last non-whitespace character to detect assignments
     last_valuable_char = ""
 
     while i < n:
         char = source[i]
-
         if in_comment:
             if char == '\n':
                 in_comment = False
                 result.append('\n')
             i += 1
             continue
-
         if quote_type:
             if quote_type in ('"""', "'''"):
                 if source[i:i + 3] == quote_type:
-                    # Keep closing quotes if we are in 'preserve' mode
                     if preserve_triple:
                         result.append(quote_type)
                     quote_type = None
@@ -72,7 +67,6 @@ def clean_source(source):
                         result.append(char)
                     i += 1
             else:
-                # Normal single-line string handling
                 if char == quote_type and (i == 0 or source[i - 1] != '\\'):
                     result.append(char)
                     quote_type = None
@@ -80,11 +74,8 @@ def clean_source(source):
                     result.append(char)
                 i += 1
             continue
-
-        # Detect Start of Transitions
         if source[i:i + 3] in ('"""', "'''"):
             quote_type = source[i:i + 3]
-            # If the last character was '=', this is data, not a docstring
             preserve_triple = (last_valuable_char == '=')
             if preserve_triple:
                 result.append(quote_type)
@@ -101,12 +92,11 @@ def clean_source(source):
                 last_valuable_char = char
             result.append(char)
             i += 1
-
     return "".join(result)
 
 
 # ==========================================
-# 3. THE INJECTION ENGINE
+# 3. THE INJECTION ENGINE (Updated for Data Safety)
 # ==========================================
 def inject_into_file(file_path, max_depth=3):
     try:
@@ -118,10 +108,19 @@ def inject_into_file(file_path, max_depth=3):
 
         new_content = [generate_header()]
         bracket_level = 0
+        in_triple_quote = False
 
         for i, line in enumerate(lines):
             stripped = line.strip()
-            if not stripped: continue
+            if not stripped:
+                new_content.append(line)
+                continue
+
+            # --- Triple Quote Detection for Data Safety ---
+            # If the line contains an odd number of triple quotes, we toggled state
+            # This handles cases where data begins or ends on a line
+            triple_count = line.count('"""') + line.count("'''")
+            starts_or_ends_triple = triple_count % 2 != 0
 
             indent_len = len(line) - len(line.lstrip())
             indent_str = line[:indent_len]
@@ -131,7 +130,6 @@ def inject_into_file(file_path, max_depth=3):
             bracket_level += (line.count('(') + line.count('[') + line.count('{'))
             bracket_level -= (line.count(')') + line.count(']') + line.count('}'))
 
-            # Improved structural check: don't wrap if line ends with ':' or starts with keyword
             structural_keywords = (
                 'def ', 'class ', 'if ', 'elif ', 'else:', 'for ', 'while ',
                 'with ', 'try:', 'except', 'finally:', '@', 'import ', 'from ',
@@ -139,10 +137,11 @@ def inject_into_file(file_path, max_depth=3):
             )
             is_structural = any(stripped.startswith(k) for k in structural_keywords) or stripped.endswith(':')
 
-            if (prev_level == 0 and bracket_level == 0 and
+            # Logic: Do not wrap if we are inside a multi-line string (data)
+            if (not in_triple_quote and prev_level == 0 and bracket_level == 0 and
                     not is_structural and current_depth <= max_depth):
 
-                if stripped in (")", "]", "}", "),", "],", "},"):
+                if stripped in (")", "]", "}", "),", "],", "},") or starts_or_ends_triple:
                     new_content.append(line)
                 else:
                     new_content.append(f"{indent_str}try:")
@@ -151,6 +150,10 @@ def inject_into_file(file_path, max_depth=3):
                     new_content.append(f"{indent_str}    _ad_script_output(f'Line {i + 1} Failed: {{e}}')")
             else:
                 new_content.append(line)
+
+            # Update state after processing the line
+            if starts_or_ends_triple:
+                in_triple_quote = not in_triple_quote
 
         with open(file_path, 'w', encoding='utf-8') as f:
             f.write("\n".join(new_content))
