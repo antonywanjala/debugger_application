@@ -1,0 +1,217 @@
+
+# ==========================================
+# STRICT RECURSIVE WRAPPER (V4.2)
+# ==========================================
+import datetime
+import sys
+import os
+
+_AD_DEBUG_ACTIVE = True
+
+def _ad_script_output(msg):
+    if not _AD_DEBUG_ACTIVE: return
+    timestamp = datetime.datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+    formatted = f"[DEBUG_ERROR] [{timestamp}] {msg}"
+    print(formatted)
+    try:
+        with open("_DEBUG_CRASH_LOG.txt", "a", encoding="utf-8") as f:
+            f.write(formatted + "\n")
+    except: pass
+# ==========================================
+
+import time
+import urllib.request
+import sys
+from collections import Counter
+def find_strict_anagrams(user_input, max_words=5, split_limit=29999):
+    try:
+        print("[1/3] Loading Strict Dictionary (Filtering Abbreviations)...")
+    except Exception as e:
+        _ad_script_output(f'Line 9 Failed: {e}')
+    try:
+        url = "https://raw.githubusercontent.com/first20hours/google-10000-english/master/google-10000-english-no-swears.txt"
+    except Exception as e:
+        _ad_script_output(f'Line 10 Failed: {e}')
+    try:
+        with urllib.request.urlopen(url) as response:
+            try:
+                raw_words = response.read().decode('utf-8').splitlines()
+            except Exception as e:
+                _ad_script_output(f'Line 14 Failed: {e}')
+    except Exception as e:
+        try:
+            print(f"Error: {e}")
+        except Exception as e:
+            _ad_script_output(f'Line 16 Failed: {e}')
+        try:
+            return
+        except Exception as e:
+            _ad_script_output(f'Line 17 Failed: {e}')
+    try:
+        blacklist = {'ca', 'ny', 'tx', 'fl', 'wa', 'al', 'ok', 'id', 'oh', 'or', 'la'}
+    except Exception as e:
+        _ad_script_output(f'Line 21 Failed: {e}')
+    try:
+        clean_target = "".join(filter(str.isalpha, user_input.lower()))
+    except Exception as e:
+        _ad_script_output(f'Line 23 Failed: {e}')
+    try:
+        target_count = Counter(clean_target)
+    except Exception as e:
+        _ad_script_output(f'Line 24 Failed: {e}')
+    try:
+        candidates = []
+    except Exception as e:
+        _ad_script_output(f'Line 26 Failed: {e}')
+    for word in raw_words:
+        try:
+            w = word.lower()
+        except Exception as e:
+            _ad_script_output(f'Line 28 Failed: {e}')
+        if len(w) < 3 and w not in ['a', 'i']:
+            continue
+        if w in blacklist:
+            continue
+        try:
+            w_count = Counter(w)
+        except Exception as e:
+            _ad_script_output(f'Line 36 Failed: {e}')
+        if all(w_count[c] <= target_count[c] for c in w_count):
+            try:
+                candidates.append(w)
+            except Exception as e:
+                _ad_script_output(f'Line 38 Failed: {e}')
+    try:
+        candidates.sort(key=len, reverse=True)
+    except Exception as e:
+        _ad_script_output(f'Line 40 Failed: {e}')
+    try:
+        print(f"[2/3] Searching for pure phrases in '{user_input}'...")
+    except Exception as e:
+        _ad_script_output(f'Line 43 Failed: {e}')
+    try:
+        found_hashes = set()
+    except Exception as e:
+        _ad_script_output(f'Line 45 Failed: {e}')
+    try:
+        matches = 0
+    except Exception as e:
+        _ad_script_output(f'Line 46 Failed: {e}')
+    try:
+        file_index = 1
+    except Exception as e:
+        _ad_script_output(f'Line 47 Failed: {e}')
+    try:
+        current_entries = 0
+    except Exception as e:
+        _ad_script_output(f'Line 48 Failed: {e}')
+    try:
+        current_file = None
+    except Exception as e:
+        _ad_script_output(f'Line 49 Failed: {e}')
+    def get_file():
+        try:
+            nonlocal current_file, file_index, current_entries
+        except Exception as e:
+            _ad_script_output(f'Line 52 Failed: {e}')
+        if current_file is None or current_entries >= split_limit:
+            if current_file: current_file.close()
+            try:
+                fname = f"strict_anagrams_part{file_index}_{user_input}_{str(time.time())}.txt"
+            except Exception as e:
+                _ad_script_output(f'Line 55 Failed: {e}')
+            try:
+                current_file = open(fname, "w")
+            except Exception as e:
+                _ad_script_output(f'Line 56 Failed: {e}')
+            try:
+                file_index += 1
+            except Exception as e:
+                _ad_script_output(f'Line 57 Failed: {e}')
+            try:
+                current_entries = 0
+            except Exception as e:
+                _ad_script_output(f'Line 58 Failed: {e}')
+        return current_file
+    def backtrack(path, pool):
+        try:
+            nonlocal matches, current_entries
+        except Exception as e:
+            _ad_script_output(f'Line 62 Failed: {e}')
+        if sum(pool.values()) == 0:
+            try:
+                phrase_hash = tuple(sorted(path))
+            except Exception as e:
+                _ad_script_output(f'Line 65 Failed: {e}')
+            if phrase_hash not in found_hashes:
+                try:
+                    found_hashes.add(phrase_hash)
+                except Exception as e:
+                    _ad_script_output(f'Line 67 Failed: {e}')
+                try:
+                    matches += 1
+                except Exception as e:
+                    _ad_script_output(f'Line 68 Failed: {e}')
+                try:
+                    current_entries += 1
+                except Exception as e:
+                    _ad_script_output(f'Line 69 Failed: {e}')
+                try:
+                    phrase_str = " ".join(path).title()
+                except Exception as e:
+                    _ad_script_output(f'Line 71 Failed: {e}')
+                try:
+                    get_file().write(phrase_str + "\n")
+                except Exception as e:
+                    _ad_script_output(f'Line 72 Failed: {e}')
+                if matches % 100 == 0:
+                    try:
+                        sys.stdout.write(f'\r✨ Found {matches} strict anagrams...')
+                    except Exception as e:
+                        _ad_script_output(f'Line 75 Failed: {e}')
+                    try:
+                        sys.stdout.flush()
+                    except Exception as e:
+                        _ad_script_output(f'Line 76 Failed: {e}')
+            try:
+                return
+            except Exception as e:
+                _ad_script_output(f'Line 77 Failed: {e}')
+        if len(path) >= max_words:
+            try:
+                return
+            except Exception as e:
+                _ad_script_output(f'Line 80 Failed: {e}')
+        for word in candidates:
+            if len(word) > sum(pool.values()): continue
+            try:
+                w_count = Counter(word)
+            except Exception as e:
+                _ad_script_output(f'Line 84 Failed: {e}')
+            if all(pool[c] >= w_count[c] for c in w_count):
+                try:
+                    backtrack(path + [word], pool - w_count)
+                except Exception as e:
+                    _ad_script_output(f'Line 86 Failed: {e}')
+    for i, root in enumerate(candidates):
+        try:
+            sys.stdout.write(f'\rProgress: {(i / len(candidates)) * 100:.1f}% ')
+        except Exception as e:
+            _ad_script_output(f'Line 90 Failed: {e}')
+        try:
+            backtrack([root], target_count - Counter(root))
+        except Exception as e:
+            _ad_script_output(f'Line 91 Failed: {e}')
+    if current_file: current_file.close()
+    try:
+        print(f"\n[3/3] Done! Total: {matches} results across {file_index - 1} file(s).")
+    except Exception as e:
+        _ad_script_output(f'Line 94 Failed: {e}')
+try:
+    u_in = input("Enter phrase: ")
+except Exception as e:
+    _ad_script_output(f'Line 98 Failed: {e}')
+try:
+    find_strict_anagrams(u_in)
+except Exception as e:
+    _ad_script_output(f'Line 99 Failed: {e}')
