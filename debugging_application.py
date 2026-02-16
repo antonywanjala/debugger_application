@@ -3,48 +3,60 @@ import shutil
 import datetime
 import time
 
-
 # ==========================================
-# 1. THE LOGGER HEADER (V4.2 - Global Control)
+# 1. THE LOGGER HEADER (V4.4 - Recursion Proof)
 # ==========================================
 def generate_header():
     return """
 # ==========================================
-# STRICT RECURSIVE WRAPPER (V4.2)
+# STRICT RECURSIVE WRAPPER (V4.4)
 # ==========================================
 import datetime
 import sys
 import os
+import builtins  # CRITICAL: Access original print
 
 _AD_DEBUG_ACTIVE = True
+_ORIGINAL_PRINT = builtins.print  # Save the real print function
 
-def _ad_script_output(msg):
+def _ad_script_output(msg, is_error=True):
     if not _AD_DEBUG_ACTIVE: return
     timestamp = datetime.datetime.now().strftime("%Y-%m-%d %H:%M:%S")
-    formatted = f"[DEBUG_ERROR] [{timestamp}] {msg}"
-    print(formatted)
+
+    if is_error:
+        formatted = f"[DEBUG_ERROR] [{timestamp}] {msg}"
+    else:
+        # For general script output, we use the requested tag
+        formatted = f"[SCRIPTATLARGE] {msg}"
+
+    # CRITICAL: Use the original print to avoid recursion loop
+    _ORIGINAL_PRINT(formatted)
+
     try:
         with open("_DEBUG_CRASH_LOG.txt", "a", encoding="utf-8") as f:
             f.write(formatted + "\\n")
     except: pass
+
+# Redirecting standard print to ensure all script output is tagged
+def print(*args, **kwargs):
+    # This captures script prints and routes them to our labeled output
+    output = " ".join(map(str, args))
+    _ad_script_output(output, is_error=False)
+
 # ==========================================
 """
-
 
 # ==========================================
 # 2. THE PRE-PROCESSOR (Context-Aware Machine)
 # ==========================================
 def clean_source(source):
-    """
-    Strips comments and docstrings.
-    Crucially: Preserves triple-quoted strings assigned to variables.
-    """
     result = []
     i = 0
     n = len(source)
     quote_type = None
     in_comment = False
     last_valuable_char = ""
+    preserve_triple = False
 
     while i < n:
         char = source[i]
@@ -57,14 +69,12 @@ def clean_source(source):
         if quote_type:
             if quote_type in ('"""', "'''"):
                 if source[i:i + 3] == quote_type:
-                    if preserve_triple:
-                        result.append(quote_type)
+                    if preserve_triple: result.append(quote_type)
                     quote_type = None
                     i += 3
                     continue
                 else:
-                    if preserve_triple:
-                        result.append(char)
+                    if preserve_triple: result.append(char)
                     i += 1
             else:
                 if char == quote_type and (i == 0 or source[i - 1] != '\\'):
@@ -77,8 +87,7 @@ def clean_source(source):
         if source[i:i + 3] in ('"""', "'''"):
             quote_type = source[i:i + 3]
             preserve_triple = (last_valuable_char == '=')
-            if preserve_triple:
-                result.append(quote_type)
+            if preserve_triple: result.append(quote_type)
             i += 3
         elif char in ('"', "'"):
             quote_type = char
@@ -94,9 +103,8 @@ def clean_source(source):
             i += 1
     return "".join(result)
 
-
 # ==========================================
-# 3. THE INJECTION ENGINE (Updated for Data Safety)
+# 3. THE INJECTION ENGINE (Updated for Labelling)
 # ==========================================
 def inject_into_file(file_path, max_depth=3):
     try:
@@ -116,15 +124,11 @@ def inject_into_file(file_path, max_depth=3):
                 new_content.append(line)
                 continue
 
-            # --- Triple Quote Detection for Data Safety ---
-            # If the line contains an odd number of triple quotes, we toggled state
-            # This handles cases where data begins or ends on a line
             triple_count = line.count('"""') + line.count("'''")
             starts_or_ends_triple = triple_count % 2 != 0
 
             indent_len = len(line) - len(line.lstrip())
             indent_str = line[:indent_len]
-            current_depth = indent_len // 4
 
             prev_level = bracket_level
             bracket_level += (line.count('(') + line.count('[') + line.count('{'))
@@ -137,9 +141,9 @@ def inject_into_file(file_path, max_depth=3):
             )
             is_structural = any(stripped.startswith(k) for k in structural_keywords) or stripped.endswith(':')
 
-            # Logic: Do not wrap if we are inside a multi-line string (data)
+            # Determine if this line should be wrapped in a try/except
             if (not in_triple_quote and prev_level == 0 and bracket_level == 0 and
-                    not is_structural and current_depth <= max_depth):
+                    not is_structural and (indent_len // 4) <= max_depth):
 
                 if stripped in (")", "]", "}", "),", "],", "},") or starts_or_ends_triple:
                     new_content.append(line)
@@ -147,11 +151,12 @@ def inject_into_file(file_path, max_depth=3):
                     new_content.append(f"{indent_str}try:")
                     new_content.append(f"{indent_str}    {stripped}")
                     new_content.append(f"{indent_str}except Exception as e:")
-                    new_content.append(f"{indent_str}    _ad_script_output(f'Line {i + 1} Failed: {{e}}')")
+                    # Explicitly use _ad_script_output for errors to get the DEBUG_ERROR tag
+                    new_content.append(
+                        f"{indent_str}    _ad_script_output(f'Line {i + 1} Failed: {{e}}', is_error=True)")
             else:
                 new_content.append(line)
 
-            # Update state after processing the line
             if starts_or_ends_triple:
                 in_triple_quote = not in_triple_quote
 
@@ -162,20 +167,17 @@ def inject_into_file(file_path, max_depth=3):
         print(f"Injection Error: {e}")
         return False
 
-
 # ==========================================
 # 4. RUNNER
 # ==========================================
 def process_project(source_dir, max_depth):
     ts_seconds = int(time.time())
-    ts_readable = datetime.datetime.now().strftime("%Y-%m-%d %H:%M:%S")
     target_dir = source_dir.rstrip('\\/') + f"_DEBUG_FINAL_{ts_seconds}"
 
     if not os.path.exists(target_dir):
         os.makedirs(target_dir)
 
-    print(f"\n[START] Build initiated at {ts_readable}")
-    print(f"[INFO] Target: {target_dir}\n")
+    print(f"\n[START] Build initiated...")
 
     for root, _, files in os.walk(source_dir):
         if any(x in root for x in ['venv', '.git', '__pycache__']): continue
@@ -189,14 +191,13 @@ def process_project(source_dir, max_depth):
                 inject_into_file(dst, max_depth)
                 print(f"  Processed: {rel}")
 
-    print(f"\n[FINISH] Build Complete")
-    print(f"Folder Timestamp: {ts_seconds}")
-
+    print(f"\n[FINISH] Build Complete: {target_dir}")
 
 if __name__ == "__main__":
     path = input("Project Path: ").strip().strip('"')
     try:
-        depth = int(input("Max Depth (default 3): ") or 3)
+        depth_input = input("Max Depth (default 3): ").strip()
+        depth = int(depth_input) if depth_input else 3
     except:
         depth = 3
 
