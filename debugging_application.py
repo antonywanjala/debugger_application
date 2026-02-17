@@ -4,20 +4,34 @@ import datetime
 import time
 
 # ==========================================
-# 1. THE LOGGER HEADER (V4.4 - Recursion Proof)
+# 1. THE LOGGER HEADER (V5.1 - Auto-Reset & Triple Log)
 # ==========================================
 def generate_header():
     return """
 # ==========================================
-# STRICT RECURSIVE WRAPPER (V4.4)
+# STRICT RECURSIVE WRAPPER (V5.1)
 # ==========================================
 import datetime
 import sys
 import os
-import builtins  # CRITICAL: Access original print
+import builtins  
 
 _AD_DEBUG_ACTIVE = True
-_ORIGINAL_PRINT = builtins.print  # Save the real print function
+_ORIGINAL_PRINT = builtins.print  
+
+# This wipes the logs fresh at the start of each execution
+def _reset_logs():
+    log_files = ["_DEBUG_ONLY.txt", "_SCRIPT_ONLY.txt", "_COMBINED_LOG.txt"]
+    for f_name in log_files:
+        try:
+            with open(f_name, "w", encoding="utf-8") as f:
+                f.write(f"--- SESSION START: {datetime.datetime.now()} ---\\n")
+        except: pass
+
+# Global flag to ensure we only wipe logs once per session, even with imports
+if not hasattr(builtins, '_AD_LOGS_WIPED'):
+    _reset_logs()
+    builtins._AD_LOGS_WIPED = True
 
 def _ad_script_output(msg, is_error=True):
     if not _AD_DEBUG_ACTIVE: return
@@ -25,21 +39,20 @@ def _ad_script_output(msg, is_error=True):
 
     if is_error:
         formatted = f"[DEBUG_ERROR] [{timestamp}] {msg}"
+        target_files = ["_DEBUG_ONLY.txt", "_COMBINED_LOG.txt"]
     else:
-        # For general script output, we use the requested tag
         formatted = f"[SCRIPTATLARGE] {msg}"
+        target_files = ["_SCRIPT_ONLY.txt", "_COMBINED_LOG.txt"]
 
-    # CRITICAL: Use the original print to avoid recursion loop
     _ORIGINAL_PRINT(formatted)
 
-    try:
-        with open("_DEBUG_CRASH_LOG.txt", "a", encoding="utf-8") as f:
-            f.write(formatted + "\\n")
-    except: pass
+    for file_name in target_files:
+        try:
+            with open(file_name, "a", encoding="utf-8") as f:
+                f.write(formatted + "\\n")
+        except: pass
 
-# Redirecting standard print to ensure all script output is tagged
 def print(*args, **kwargs):
-    # This captures script prints and routes them to our labeled output
     output = " ".join(map(str, args))
     _ad_script_output(output, is_error=False)
 
@@ -51,8 +64,7 @@ def print(*args, **kwargs):
 # ==========================================
 def clean_source(source):
     result = []
-    i = 0
-    n = len(source)
+    i, n = 0, len(source)
     quote_type = None
     in_comment = False
     last_valuable_char = ""
@@ -104,7 +116,7 @@ def clean_source(source):
     return "".join(result)
 
 # ==========================================
-# 3. THE INJECTION ENGINE (Updated for Labelling)
+# 3. THE INJECTION ENGINE
 # ==========================================
 def inject_into_file(file_path, max_depth=3):
     try:
@@ -141,7 +153,6 @@ def inject_into_file(file_path, max_depth=3):
             )
             is_structural = any(stripped.startswith(k) for k in structural_keywords) or stripped.endswith(':')
 
-            # Determine if this line should be wrapped in a try/except
             if (not in_triple_quote and prev_level == 0 and bracket_level == 0 and
                     not is_structural and (indent_len // 4) <= max_depth):
 
@@ -151,7 +162,6 @@ def inject_into_file(file_path, max_depth=3):
                     new_content.append(f"{indent_str}try:")
                     new_content.append(f"{indent_str}    {stripped}")
                     new_content.append(f"{indent_str}except Exception as e:")
-                    # Explicitly use _ad_script_output for errors to get the DEBUG_ERROR tag
                     new_content.append(
                         f"{indent_str}    _ad_script_output(f'Line {i + 1} Failed: {{e}}', is_error=True)")
             else:
