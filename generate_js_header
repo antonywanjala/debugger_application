@@ -1,0 +1,152 @@
+import os
+import shutil
+import time
+import re
+
+# ==========================================
+# 1. THE JAVASCRIPT LOGGER HEADER
+# ==========================================
+def generate_js_header():
+    return """/* ==========================================
+STRICT RECURSIVE WRAPPER + STATE TRACKER (JS V1.0)
+==========================================
+*/
+const fs = require('fs');
+const path = require('path');
+
+let _AD_DEBUG_ACTIVE = true;
+const _ORIGINAL_CONSOLE_LOG = console.log;
+
+function _reset_logs() {
+    const logFiles = ["_DEBUG_ONLY.txt", "_SCRIPT_ONLY.txt", "_COMBINED_LOG.txt"];
+    const timestamp = new Date().toISOString();
+    logFiles.forEach(f => {
+        try { fs.writeFileSync(f, `--- SESSION START: ${timestamp} ---\\n`); } catch(e) {}
+    });
+
+    try {
+        fs.writeFileSync("_VARIABLE_TRACKER.csv", "Line,Variable,Value\\n");
+    } catch(e) {}
+}
+
+if (!global._AD_LOGS_WIPED) {
+    _reset_logs();
+    global._AD_LOGS_WIPED = true;
+}
+
+function _record_state(lineNo, scope) {
+    if (!_AD_DEBUG_ACTIVE) return;
+    try {
+        let entry = "";
+        for (let key in scope) {
+            if (key.startsWith('_') || typeof scope[key] === 'function') continue;
+            let val = String(scope[key]).replace(/\\n/g, ' ').replace(/\\r/g, '');
+            entry += `${lineNo},${key},${val}\\n`;
+        }
+        if (entry) fs.appendFileSync("_VARIABLE_TRACKER.csv", entry);
+    } catch(e) {}
+}
+
+function _ad_script_output(msg, isError = true) {
+    if (!_AD_DEBUG_ACTIVE) return;
+    const timestamp = new Date().toISOString();
+    const formatted = isError ? `[DEBUG_ERROR] [${timestamp}] ${msg}` : `[SCRIPT] ${msg}`;
+    
+    _ORIGINAL_CONSOLE_LOG(formatted);
+
+    const targets = isError ? ["_DEBUG_ONLY.txt", "_COMBINED_LOG.txt"] : ["_SCRIPT_ONLY.txt", "_COMBINED_LOG.txt"];
+    targets.forEach(f => {
+        try { fs.appendFileSync(f, formatted + "\\n"); } catch(e) {}
+    });
+}
+
+// Override global console.log
+console.log = function(...args) {
+    _ad_script_output(args.join(" "), false);
+};
+// ==========================================
+"""
+
+# ==========================================
+# 2. JS PRE-PROCESSOR (Strips comments/strings)
+# ==========================================
+def clean_js_source(source):
+    # Removes single-line and multi-line comments for logic analysis
+    return re.sub(r'//.*|/\*[\s\S]*?\*/', '', source)
+
+# ==========================================
+# 3. THE INJECTION ENGINE (JS Syntax)
+# ==========================================
+def inject_into_js_file(file_path, max_depth=3):
+    try:
+        with open(file_path, 'r', encoding='utf-8') as f:
+            lines = f.readlines()
+
+        new_content = [generate_js_header()]
+        
+        for i, line in enumerate(lines):
+            stripped = line.strip()
+            indent_len = len(line) - len(line.lstrip())
+            indent_str = line[:indent_len]
+
+            # Skip empty lines, comments, or structural markers
+            if not stripped or stripped.startswith(('/', '*', 'import', 'require')):
+                new_content.append(line)
+                continue
+
+            # Check for structural keywords where we shouldn't inject a try-catch directly
+            structural = ('if', 'else', 'for', 'while', 'switch', 'try', 'catch', 'finally', 'class', 'function', 'const', 'let', 'var')
+            
+            # Simple depth check based on indentation (assuming 2 or 4 spaces)
+            current_depth = indent_len // 2 
+            
+            # We wrap assignments and function calls, avoiding control flow headers
+            if not any(stripped.startswith(k) for k in structural) and not stripped.endswith('{') and current_depth <= max_depth:
+                new_content.append(f"{indent_str}try {{\n")
+                new_content.append(f"{indent_str}    {stripped}\n")
+                # Note: JS 'locals()' equivalent is tricky; here we just log the line success
+                new_content.append(f"{indent_str}}} catch (e) {{ _ad_script_output(`Line {i+1} Failed: ${{e.message}}`, true); }}\n")
+            else:
+                new_content.append(line)
+
+        with open(file_path, 'w', encoding='utf-8') as f:
+            f.writelines(new_content)
+        return True
+    except Exception as e:
+        print(f"Injection Error: {e}")
+        return False
+
+# ==========================================
+# 4. RUNNER
+# ==========================================
+def process_js_project(source_dir, max_depth):
+    suffix = int(time.time())
+    target_dir = source_dir.rstrip('\\/') + f"_JS_DEBUG_{suffix}"
+    
+    if not os.path.exists(target_dir):
+        os.makedirs(target_dir)
+        
+    print(f"\n[START] Building instrumented JS project...")
+    
+    for root, _, files in os.walk(source_dir):
+        if any(x in root for x in ['node_modules', '.git', 'dist']): continue
+        for file in files:
+            if file.endswith(".js"):
+                src = os.path.join(root, file)
+                dst = os.path.join(target_dir, os.path.relpath(src, source_dir))
+                os.makedirs(os.path.dirname(dst), exist_ok=True)
+                shutil.copy2(src, dst)
+                inject_into_js_file(dst, max_depth)
+                print(f"   Instrumented: {file}")
+                
+    print(f"\n[FINISH] Project ready at: {target_dir}")
+
+if __name__ == "__main__":
+    p = input("JS Project Path: ").strip().strip('"')
+    try:
+        d = int(input("Max Depth (default 3): ").strip() or 3)
+    except: d = 3
+    if os.path.isdir(p):
+        process_js_project(p, d)
+    else:
+        print("Invalid path.")
