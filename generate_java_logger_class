@@ -1,0 +1,91 @@
+import os
+import shutil
+import time
+import javalang # Requires: pip install javalang
+
+# ==========================================
+# 1. THE JAVA LOGGER CLASS (Simplified)
+# ==========================================
+def generate_java_logger_class():
+    return """package com.addebug;
+import java.io.*;
+import java.time.LocalDateTime;
+
+public class AdDebugLogger {
+    public static void log(String file, int line, String code) {
+        try (PrintWriter out = new PrintWriter(new FileWriter("_TRACE.log", true))) {
+            out.println(LocalDateTime.now() + " | " + file + ":" + line + " | " + code);
+        } catch (IOException e) {}
+    }
+}
+"""
+
+# ==========================================
+# 2. THE AST INJECTION ENGINE
+# ==========================================
+def inject_with_ast(file_path, base_name):
+    try:
+        with open(file_path, 'r', encoding='utf-8') as f:
+            source = f.read()
+
+        # Parse the Java code into a tree
+        tree = javalang.parse.parse(source)
+        lines = source.splitlines()
+        
+        # We collect points of interest (Line numbers of statements)
+        # We iterate backwards so that inserting lines doesn't shift 
+        # the line numbers for subsequent injections.
+        injection_points = []
+        
+        for path, node in tree:
+            # Target common statements: Assignments, Method Invocations, etc.
+            if isinstance(node, (javalang.tree.Statement, javalang.tree.VariableDeclaration)):
+                if hasattr(node, 'position') and node.position:
+                    injection_points.append(node.position.line)
+
+        # Sort and remove duplicates
+        injection_points = sorted(list(set(injection_points)), reverse=True)
+
+        for line_no in injection_points:
+            indent = " " * (len(lines[line_no-1]) - len(lines[line_no-1].lstrip()))
+            log_call = f'{indent}com.addebug.AdDebugLogger.log("{base_name}", {line_no}, "{lines[line_no-1].strip().replace('"', "'")}");'
+            lines.insert(line_no - 1, log_call)
+
+        # Ensure import or fully qualified name is used (we used fully qualified above)
+        with open(file_path, 'w', encoding='utf-8') as f:
+            f.write("\n".join(lines))
+        return True
+    except Exception as e:
+        # Fallback to standard copy if AST parsing fails (e.g., modern Java features not supported by javalang)
+        print(f"AST Error in {base_name}: {e}. Skipping instrumentation.")
+        return False
+
+# ==========================================
+# 3. RUNNER
+# ==========================================
+def process_project(source_dir):
+    target_dir = source_dir.rstrip('\\/') + f"_AST_DEBUG_{int(time.time())}"
+    os.makedirs(target_dir, exist_ok=True)
+    
+    # Generate Logger Utility
+    logger_path = os.path.join(target_dir, "com/addebug/AdDebugLogger.java")
+    os.makedirs(os.path.dirname(logger_path), exist_ok=True)
+    with open(logger_path, "w") as f: f.write(generate_java_logger_class())
+
+    for root, _, files in os.walk(source_dir):
+        for file in files:
+            src = os.path.join(root, file)
+            dst = os.path.join(target_dir, os.path.relpath(src, source_dir))
+            os.makedirs(os.path.dirname(dst), exist_ok=True)
+            
+            if file.endswith(".java"):
+                shutil.copy2(src, dst)
+                inject_with_ast(dst, file)
+            else:
+                shutil.copy2(src, dst)
+    
+    print(f"Instrumented project created at: {target_dir}")
+
+if __name__ == "__main__":
+    p = input("Java Project Path: ").strip().strip('"')
+    process_project(p)
