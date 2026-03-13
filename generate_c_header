@@ -1,0 +1,122 @@
+import os
+import shutil
+import time
+import re
+
+# ==========================================
+# 1. THE C LOGGER HEADER (Embedded C Code)
+# ==========================================
+def generate_c_header():
+    return """
+/* ==========================================
+   STRICT C STATE TRACKER & LOGGER (V1.0)
+   ========================================== */
+#include <stdio.h>
+#include <time.h>
+#include <errno.h>
+#include <string.h>
+
+static void _ad_log(const char* level, const char* msg, int line) {
+    FILE *f = fopen("_COMBINED_LOG.txt", "a");
+    if (!f) return;
+    time_t now;
+    time(&now);
+    char *date = ctime(&now);
+    date[strlen(date) - 1] = '\\0'; // Remove newline
+    fprintf(f, "[%s] [%s] (Line %d): %s\\n", level, date, line, msg);
+    fclose(f);
+}
+
+// Simple macro to log execution of a line
+#define LOG_LINE(cmd) do { \\
+    _ad_log("TRACE", #cmd, __LINE__); \\
+    cmd; \\
+} while(0)
+
+/* ========================================== */
+"""
+
+# ==========================================
+# 2. C SOURCE CLEANER
+# ==========================================
+def clean_c_source(source):
+    # Removes block comments /* ... */ and line comments // ...
+    source = re.sub(re.compile(r"/\*.*?\*/", re.DOTALL), "", source)
+    source = re.sub(re.compile(r"//.*?\n"), "\n", source)
+    return source
+
+# ==========================================
+# 3. THE INJECTION ENGINE (C Implementation)
+# ==========================================
+def inject_into_c_file(file_path):
+    try:
+        with open(file_path, 'r', encoding='utf-8') as f:
+            lines = f.readlines()
+
+        new_content = [generate_c_header()]
+        
+        for i, line in enumerate(lines):
+            stripped = line.strip()
+            
+            # Skip headers, braces, and empty lines
+            if (not stripped or 
+                stripped.startswith("#") or 
+                stripped.startswith("/") or 
+                stripped in ("{", "}", "};")):
+                new_content.append(line)
+                continue
+
+            # We wrap standard statements that end in semicolons
+            # Note: This is a simplified approach for C.
+            if stripped.endswith(";") and not stripped.startswith("return"):
+                indent = line[:line.find(stripped[0])]
+                new_content.append(f'{indent}LOG_LINE({stripped[:-1]}); // Instrumented\n')
+            else:
+                new_content.append(line)
+
+        with open(file_path, 'w', encoding='utf-8') as f:
+            f.writelines(new_content)
+        return True
+    except Exception as e:
+        print(f"Injection Error on {file_path}: {e}")
+        return False
+
+# ==========================================
+# 4. RUNNER
+# ==========================================
+def process_c_project(source_dir):
+    timestamp = int(time.time())
+    target_dir = source_dir.rstrip('\\/') + f"_C_DEBUG_{timestamp}"
+    
+    if not os.path.exists(target_dir):
+        os.makedirs(target_dir)
+        
+    print(f"\n[START] Building instrumented C project...")
+    
+    for root, _, files in os.walk(source_dir):
+        # Avoid build folders or git
+        if any(x in root for x in ['.git', 'build', 'obj', 'bin']):
+            continue
+            
+        for file in files:
+            if file.endswith((".c", ".cpp", ".h")):
+                src = os.path.join(root, file)
+                dst = os.path.join(target_dir, os.path.relpath(src, source_dir))
+                
+                os.makedirs(os.path.dirname(dst), exist_ok=True)
+                shutil.copy2(src, dst)
+                
+                if file.endswith((".c", ".cpp")):
+                    inject_into_c_file(dst)
+                    print(f"   Instrumented: {file}")
+                else:
+                    print(f"   Copied (Header): {file}")
+                    
+    print(f"\n[FINISH] Project ready at: {target_dir}")
+
+if __name__ == "__main__":
+    path = input("C Project Path: ").strip().strip('"')
+    if os.path.isdir(path):
+        process_c_project(path)
+    else:
+        print("Invalid path.")
