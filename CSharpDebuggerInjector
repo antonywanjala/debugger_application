@@ -1,0 +1,94 @@
+using System;
+using System.IO;
+using System.Linq;
+using System.Text.RegularExpressions;
+
+class CSharpDebuggerInjector
+{
+    // 1. THE LOGGER HEADER (Injected as a static helper class)
+    static string GetHeader() => @"
+using System;
+using System.IO;
+using System.Collections.Generic;
+using System.Reflection;
+
+public static class _AD_Debug {
+    private static string logFile = ""_DEBUG_LOG.txt"";
+    private static string csvFile = ""_VARIABLE_TRACKER.csv"";
+
+    static _AD_Debug() {
+        File.WriteAllText(logFile, $""--- SESSION START: {DateTime.Now} ---\\n"");
+        File.WriteAllText(csvFile, ""Line,Variable,Value\\n"");
+    }
+
+    public static void RecordState(int line, string varName, object value) {
+        try {
+            string valStr = value?.ToString().Replace(""\\n"", "" "").Replace(""\\r"", """") ?? ""null"";
+            File.AppendAllText(csvFile, $""{line},{varName},{valStr}\\n"");
+        } catch { }
+    }
+
+    public static void LogError(int line, Exception e) {
+        string msg = $""[DEBUG_ERROR] Line {line}: {e.Message}"";
+        Console.WriteLine(msg);
+        File.AppendAllText(logFile, msg + ""\\n"");
+    }
+}";
+
+    // 2. THE INJECTION ENGINE
+    static void InjectFile(string path)
+    {
+        var lines = File.ReadAllLines(path).ToList();
+        var newLines = new List<string> { GetHeader() };
+
+        for (int i = 0; i < lines.Count; i++)
+        {
+            string line = lines[i];
+            string trimmed = line.Trim();
+
+            // Only wrap lines that look like assignments or method calls
+            // and avoid structural keywords (if, for, while, using, etc.)
+            if (trimmed.EndsWith(";") && 
+                !trimmed.StartsWith("using ") && 
+                !trimmed.StartsWith("namespace ") && 
+                !trimmed.Contains("return "))
+            {
+                string indent = line.Substring(0, line.IndexOf(trimmed[0]));
+                newLines.Add($"{indent}try {{");
+                newLines.Add($"{indent}    {trimmed}");
+                
+                // Regex to find potential variable names in the line for tracking
+                var match = Regex.Match(trimmed, @"\b([a-zA-Z_][a-zA-Z0-9_]*)\s*=");
+                if (match.Success) {
+                    string varName = match.Groups[1].Value;
+                    newLines.Add($"{indent}    _AD_Debug.RecordState({i+1}, \"{varName}\", {varName});");
+                }
+
+                newLines.Add($"{indent}}} catch (Exception _ex) {{ _AD_Debug.LogError({i+1}, _ex); }}");
+            }
+            else
+            {
+                newLines.Add(line);
+            }
+        }
+        File.WriteAllLines(path, newLines);
+    }
+
+    // 3. RUNNER
+    public static void Main()
+    {
+        Console.Write("Enter C# Project Path: ");
+        string path = Console.ReadLine();
+        
+        if (Directory.Exists(path))
+        {
+            var files = Directory.GetFiles(path, "*.cs", SearchOption.AllDirectories);
+            foreach (var file in files)
+            {
+                if (file.Contains("obj") || file.Contains("bin")) continue;
+                InjectFile(file);
+                Console.WriteLine($"Instrumented: {Path.GetFileName(file)}");
+            }
+        }
+    }
+}
