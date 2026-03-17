@@ -1,0 +1,72 @@
+import os
+import shutil
+import time
+
+HEADER = """# --- DEBUG HEADER START ---
+# (Insert the Ruby Header Code block from above here)
+# --- DEBUG HEADER END ---
+"""
+
+def inject_into_ruby(file_path, max_depth=3):
+    try:
+        with open(file_path, 'r', encoding='utf-8') as f:
+            lines = f.readlines()
+
+        new_content = [HEADER]
+        
+        # Ruby structural keywords
+        structural = ('def ', 'class ', 'module ', 'if ', 'elsif ', 'else', 'begin', 
+                      'rescue', 'ensure', 'while ', 'until ', 'for ', 'case ', 'when ')
+
+        for i, line in enumerate(lines):
+            stripped = line.strip()
+            indent_len = len(line) - len(line.lstrip())
+            indent_str = line[:indent_len]
+
+            # Skip empty lines, comments, or complex multiline strings
+            if not stripped or stripped.startswith('#') or stripped.startswith('=begin'):
+                new_content.append(line)
+                continue
+
+            # Determine if we should wrap this line
+            is_structural = any(stripped.startswith(k) for k in structural)
+            current_depth = indent_len // 2 # Ruby standard is 2 spaces
+
+            if not is_structural and current_depth <= max_depth and not stripped.startswith('end'):
+                new_content.append(f"{indent_str}begin\n")
+                new_content.append(f"{indent_str}  {stripped}\n")
+                new_content.append(f"{indent_str}  DebugLogger.record_state({i + 1}, binding)\n")
+                new_content.append(f"{indent_str}rescue => e\n")
+                new_content.append(f"{indent_str}  DebugLogger.log_output(\"Line {i+1} Failed: #{{e}}\", is_error: true)\n")
+                new_content.append(f"{indent_str}  raise e\n")
+                new_content.append(f"{indent_str}end\n")
+            else:
+                new_content.append(line)
+
+        with open(file_path, 'w', encoding='utf-8') as f:
+            f.writelines(new_content)
+        return True
+    except Exception as e:
+        print(f"Injection Error on {file_path}: {e}")
+        return False
+
+def process_ruby_project(source_dir, max_depth):
+    target_dir = source_dir.rstrip('\\/') + f"_RUBY_DEBUG_{int(time.time())}"
+    os.makedirs(target_dir, exist_ok=True)
+    
+    for root, _, files in os.walk(source_dir):
+        if any(x in root for x in ['.git', 'bundle', 'vendor']): continue
+        for file in files:
+            if file.endswith(".rb"):
+                src = os.path.join(root, file)
+                dst = os.path.join(target_dir, os.path.relpath(src, source_dir))
+                os.makedirs(os.path.dirname(dst), exist_ok=True)
+                shutil.copy2(src, dst)
+                inject_into_ruby(dst, max_depth)
+                print(f"Instrumented: {file}")
+    print(f"\nDone! Project at: {target_dir}")
+
+if __name__ == "__main__":
+    path = input("Ruby Project Path: ").strip().strip('"')
+    depth = int(input("Max Depth (default 3): ") or 3)
+    process_ruby_project(path, depth)
