@@ -1,0 +1,135 @@
+import os
+import shutil
+import time
+import re
+
+# ==========================================
+# 1. THE GO LOGGER UTILITY (Go Version of Header)
+# ==========================================
+def generate_go_debug_util(package_name):
+    return f"""package {package_name}
+
+import (
+	"encoding/csv"
+	"fmt"
+	"os"
+	"time"
+)
+
+var debugLogWiped = false
+
+func _record_state(line int, varName string, value interfaceDefault) {{
+	f, err := os.OpenFile("_VARIABLE_TRACKER.csv", os.O_APPEND|os.O_CREATE|os.O_WRONLY, 0644)
+	if err != nil {{ return }}
+	defer f.Close()
+
+	writer := csv.NewWriter(f)
+	defer writer.Flush()
+
+	if !debugLogWiped {{
+		writer.Write([]string{{"Line", "Variable", "Value"}})
+		debugLogWiped = true
+	}}
+	writer.Write([]string{{fmt.Sprintf("%d", line), varName, fmt.Sprintf("%+v", value)}})
+}}
+
+func _ad_log_error(line int, err error) {{
+	if err == nil {{ return }}
+	timestamp := time.Now().Format("2006-01-02 15:04:05")
+	msg := fmt.Sprintf("[DEBUG_ERROR] [%s] Line %d: %v\\n", timestamp, line, err)
+	fmt.Print(msg)
+	
+	f, _ := os.OpenFile("_COMBINED_LOG.txt", os.O_APPEND|os.O_CREATE|os.O_WRONLY, 0644)
+	defer f.Close()
+	f.WriteString(msg)
+}}
+type interfaceDefault = interface{{}}
+"""
+
+# ==========================================
+# 2. THE GO INJECTION ENGINE
+# ==========================================
+def inject_into_go_file(file_path):
+    try:
+        with open(file_path, 'r', encoding='utf-8') as f:
+            lines = f.readlines()
+
+        new_content = []
+        package_found = False
+        
+        # Simple regex to catch assignments like 'x := 5' or 'err = doWork()'
+        assignment_pattern = re.compile(r'(\w+)\s*(:=|=)\s*(.+)')
+
+        for i, line in enumerate(lines):
+            stripped = line.strip()
+            new_content.append(line)
+
+            # Skip package, imports, and comments
+            if stripped.startswith("package "):
+                package_found = True
+                continue
+            if not stripped or stripped.startswith("//") or stripped.startswith("import"):
+                continue
+
+            # Logic: If line is an assignment, record the variable state
+            match = assignment_pattern.search(stripped)
+            if match and "if " not in stripped:
+                var_name = match.group(1)
+                indent = line[:line.find(stripped)]
+                # Inject state recording after the assignment
+                new_content.append(f'{indent}_record_state({i + 1}, "{var_name}", {var_name})\n')
+
+            # Logic: If line handles 'err', inject an error logger
+            if "if err != nil" in stripped:
+                indent = line[:line.find(stripped)]
+                new_content.append(f'{indent}    _ad_log_error({i + 1}, err)\n')
+
+        # Add the utility file to the directory if not exists
+        pkg_name = "main"
+        for l in lines:
+            if l.startswith("package "):
+                pkg_name = l.split()[1]
+                break
+        
+        util_path = os.path.join(os.path.dirname(file_path), "debug_util.go")
+        if not os.path.exists(util_path):
+            with open(util_path, 'w', encoding='utf-8') as f:
+                f.write(generate_go_debug_util(pkg_name))
+
+        with open(file_path, 'w', encoding='utf-8') as f:
+            f.writelines(new_content)
+        return True
+    except Exception as e:
+        print(f"Injection Error: {e}")
+        return False
+
+# ==========================================
+# 3. RUNNER
+# ==========================================
+def process_go_project(source_dir):
+    target_dir = source_dir.rstrip('\\/') + f"_GO_DEBUG_{int(time.time())}"
+    print(f"\n[START] Instrumenting Go Project...")
+    
+    for root, _, files in os.walk(source_dir):
+        if any(x in root for x in ['.git', 'bin', 'pkg']): continue
+        for file in files:
+            src = os.path.join(root, file)
+            dst = os.path.join(target_dir, os.path.relpath(src, source_dir))
+            os.makedirs(os.path.dirname(dst), exist_ok=True)
+            
+            if file.endswith(".go"):
+                shutil.copy2(src, dst)
+                inject_into_go_file(dst)
+                print(f"    Instrumented: {file}")
+            else:
+                shutil.copy2(src, dst)
+
+    print(f"\n[FINISH] Instrumented Go source ready at: {target_dir}")
+    print("Note: Run 'go run .' or 'go build' in the new directory.")
+
+if __name__ == "__main__":
+    p = input("Go Project Path: ").strip().strip('"')
+    if os.path.isdir(p):
+        process_go_project(p)
+    else:
+        print("Invalid path.")
