@@ -1,0 +1,134 @@
+import os
+import shutil
+import time
+import re
+
+# ==========================================
+# 1. THE PHP LOGGER HEADER (V1.0)
+# ==========================================
+def generate_php_header():
+    return """<?php
+/* ==========================================
+   STRICT PHP WRAPPER + STATE TRACKER
+   ========================================== */
+if (!defined('_AD_DEBUG_INIT')) {
+    define('_AD_DEBUG_INIT', true);
+    
+    function _resetLogs() {
+        $logFiles = ["_DEBUG_ONLY.txt", "_SCRIPT_ONLY.txt", "_COMBINED_LOG.txt"];
+        foreach ($logFiles as $f) {
+            @file_put_contents($f, "--- SESSION START: " . date('Y-m-d H:i:s') . " ---\\n");
+        }
+        @file_put_contents("_VARIABLE_TRACKER.csv", "Line,Variable,Value\\n");
+    }
+
+    _resetLogs();
+
+    function _recordState($lineNo, $vars) {
+        $rows = "";
+        foreach ($vars as $key => $val) {
+            if ($key === 'GLOBALS' || str_contains($key, '_')) continue;
+            $cleanVal = str_replace(["\\n", "\\r"], ' ', print_r($val, true));
+            $rows .= "{$lineNo},{$key},\\"{$cleanVal}\\"\\n";
+        }
+        @file_put_contents("_VARIABLE_TRACKER.csv", $rows, FILE_APPEND);
+    }
+
+    function _adScriptOutput($msg, $isError = true) {
+        $timestamp = date('Y-m-d H:i:s');
+        $formatted = $isError ? "[DEBUG_ERROR] [{$timestamp}] {$msg}" : "[SCRIPT] [{$timestamp}] {$msg}";
+        
+        $targets = $isError ? ["_DEBUG_ONLY.txt", "_COMBINED_LOG.txt"] : ["_SCRIPT_ONLY.txt", "_COMBINED_LOG.txt"];
+        foreach ($targets as $f) {
+            @file_put_contents($f, $formatted . "\\n", FILE_APPEND);
+        }
+    }
+}
+?>
+"""
+
+# ==========================================
+# 2. THE INJECTION ENGINE (PHP ADAPTED)
+# ==========================================
+def inject_into_php_file(file_path):
+    try:
+        with open(file_path, 'r', encoding='utf-8') as f:
+            content = f.read()
+
+        # Remove existing PHP open tag to prep for header injection
+        content = content.replace('<?php', '', 1).replace('<?', '', 1)
+        lines = content.splitlines()
+
+        new_content = [generate_php_header()]
+        
+        # Regex to avoid instrumenting structural lines
+        skip_patterns = [
+            r'^\s*$',                      # Empty lines
+            r'^\s*//',                     # Comments
+            r'^\s*/\*',                    # Multi-line comments
+            r'^\s*use\s',                  # Namespaces
+            r'^\s*namespace\s',            # Namespaces
+            r'^\s*class\s',                # Class definitions
+            r'^\s*public|protected|private', # Methods
+            r'^\s*[\}\s]*$',               # Closing braces
+            r'^\s*(else|try|finally|catch|case|default)', # Control flow
+        ]
+
+        for i, line in enumerate(lines):
+            stripped = line.strip()
+            
+            # Check if line is a standard instruction ending in semicolon
+            should_instrument = not any(re.match(p, line) for p in skip_patterns) and stripped.endswith(';')
+
+            if should_instrument:
+                indent = line[:line.find(line.lstrip())]
+                # Wrap the line in try/catch and use get_defined_vars() for state tracking
+                new_content.append(f"{indent}try {{\n")
+                new_content.append(f"{line}\n")
+                new_content.append(f"{indent}    _recordState({i+1}, get_defined_vars());\n")
+                new_content.append(f"{indent}}} catch (\\Throwable $e) {{\n")
+                new_content.append(f"{indent}    _adScriptOutput('Line {i+1} Failed: ' . $e->getMessage(), true);\n")
+                new_content.append(f"{indent}    throw $e;\n")
+                new_content.append(f"{indent}}}\n")
+            else:
+                new_content.append(line + "\n")
+
+        with open(file_path, 'w', encoding='utf-8') as f:
+            f.writelines(new_content)
+        return True
+    except Exception as e:
+        print(f"Injection Error in {file_path}: {e}")
+        return False
+
+# ==========================================
+# 3. RUNNER
+# ==========================================
+def process_php_project(source_dir):
+    target_dir = source_dir.rstrip('\\/') + f"_PHP_DEBUG_{int(time.time())}"
+    
+    print(f"\n[START] Building instrumented PHP project...")
+    
+    for root, dirs, files in os.walk(source_dir):
+        # Ignore common vendor and version control folders
+        if any(x in root for x in ['vendor', '.git', '.vscode']): continue
+        
+        for file in files:
+            if file.endswith(".php"):
+                src = os.path.join(root, file)
+                # Determine relative path for the new folder
+                rel_path = os.path.relpath(src, source_dir)
+                dst = os.path.join(target_dir, rel_path)
+                
+                os.makedirs(os.path.dirname(dst), exist_ok=True)
+                shutil.copy2(src, dst)
+                inject_into_php_file(dst)
+                print(f"    Instrumented: {rel_path}")
+
+    print(f"\n[FINISH] Project ready at: {target_dir}")
+
+if __name__ == "__main__":
+    p = input("PHP Project Path: ").strip().strip('"')
+    if os.path.isdir(p):
+        process_php_project(p)
+    else:
+        print("Invalid path.")
