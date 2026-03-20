@@ -1,0 +1,41 @@
+import sqlite3
+
+def run_database_update(user_id, new_email):
+    # 1. Define your connection
+    conn = sqlite3.connect(":memory:")
+    cursor = conn.cursor()
+    
+    # Create a dummy table for the example
+    cursor.execute("CREATE TABLE users (id INT, email TEXT)")
+    cursor.execute("INSERT INTO users VALUES (1, 'old@example.com')")
+
+    # 2. Format your SQL into a variable (The Instrumentor will capture this)
+    # Even if you use parameterization (recommended), storing the raw values 
+    # in variables ensures the logger sees exactly what is being passed.
+    target_id = user_id
+    email_val = new_email
+    
+    sql_query = "UPDATE users SET email = ? WHERE id = ?"
+    params = (email_val, target_id)
+
+    # 3. Execution
+    # If this fails, the injected 'except' block will catch the Line Number 
+    # and the specific Database Error.
+    cursor.execute(sql_query, params)
+    conn.commit()
+    
+    # 4. Verification
+    cursor.execute("SELECT * FROM users WHERE id = ?", (target_id,))
+    result = cursor.fetchone()
+    
+    print(f"Update successful: {result}")
+    
+    conn.close()
+
+if __name__ == "__main__":
+    # Test with valid data
+    run_database_update(1, "new_secure@example.com")
+    
+    # Test with something that might cause an error
+    # (e.g., passing a list where a string is expected)
+    run_database_update(1, ["not", "a", "string"])
