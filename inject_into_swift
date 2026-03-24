@@ -1,0 +1,93 @@
+import os
+import shutil
+import time
+
+# ==========================================
+# 1. THE SWIFT LOGGER MODULE
+# This content will be saved as "AD_Logger.swift" in the target project.
+# ==========================================
+SWIFT_LOGGER_CONTENT = """
+import Foundation
+
+struct AD_Logger {
+    static let debugLog = FileManager.default.urls(for: .documentDirectory, in: .userDomainMask).appendingPathComponent("_DEBUG_LOG.txt")
+    static let stateCSV = FileManager.default.urls(for: .documentDirectory, in: .userDomainMask).appendingPathComponent("_VARIABLE_TRACKER.csv")
+
+    static func setup() {
+        let header = "Timestamp,Line,Variable,Value\\n"
+        try? header.write(to: stateCSV, atomically: true, encoding: .utf8)
+        try? "--- SESSION START ---/n".write(to: debugLog, atomically: true, encoding: .utf8)
+        print("[DEBUG] Logs initialized at: \\(stateCSV.path)")
+    }
+
+    static func record(_ line: Int, _ name: String, _ value: Any) {
+        let timestamp = Date().description
+        let row = "\\(timestamp),\\(line),\\(name),\\(String(describing: value))\\n"
+        if let data = row.data(using: .utf8) {
+            if let fileHandle = try? FileHandle(forWritingTo: stateCSV) {
+                fileHandle.seekToEndOfFile()
+                fileHandle.write(data)
+                fileHandle.closeFile()
+            }
+        }
+    }
+}
+"""
+
+# ==========================================
+# 2. THE SWIFT INJECTION ENGINE
+# ==========================================
+def inject_into_swift(file_path):
+    try:
+        with open(file_path, 'r', encoding='utf-8') as f:
+            lines = f.readlines()
+
+        new_lines = []
+        for i, line in enumerate(lines):
+            new_lines.append(line)
+            stripped = line.strip()
+
+            # Detect variable assignments (e.g., "var x = 10" or "y = 20")
+            if ("var " in stripped or "let " in stripped or " = " in stripped) and not stripped.startswith("//"):
+                # Basic extraction of variable name
+                parts = stripped.replace("var ", "").replace("let ", "").split("=")
+                if len(parts) > 1:
+                    var_name = parts.strip().split(":").strip() # Handles 'var x: Int'
+                    indent = line[:len(line) - len(line.lstrip())]
+                    # Inject state recorder
+                    new_lines.append(f"{indent}AD_Logger.record({i+1}, \"{var_name}\", {var_name})\n")
+
+        with open(file_path, 'w', encoding='utf-8') as f:
+            f.writelines(new_lines)
+    except Exception as e:
+        print(f"Error processing {file_path}: {e}")
+
+# ==========================================
+# 3. RUNNER
+# ==========================================
+def process_swift_project(source_dir):
+    target_dir = source_dir.rstrip('\\/') + f"_SWIFT_DEBUG_{int(time.time())}"
+    
+    # 1. Copy Project
+    shutil.copytree(source_dir, target_dir, ignore=shutil.ignore_patterns('.git', 'DerivedData', '*.xcodeproj'))
+    
+    # 2. Add the Logger file
+    with open(os.path.join(target_dir, "AD_Logger.swift"), "w") as f:
+        f.write(SWIFT_LOGGER_CONTENT)
+
+    # 3. Instrument Swift Files
+    for root, _, files in os.walk(target_dir):
+        for file in files:
+            if file.endswith(".swift") and file != "AD_Logger.swift":
+                inject_into_swift(os.path.join(root, file))
+                print(f"Instrumented: {file}")
+
+    print(f"\n[FINISH] Instrumented Swift project at: {target_dir}")
+    print("IMPORTANT: Manually add AD_Logger.swift to your Xcode project and call AD_Logger.setup() at App Launch.")
+
+if __name__ == "__main__":
+    p = input("Swift Project Path: ").strip().strip('"')
+    if os.path.isdir(p):
+        process_swift_project(p)
+    else:
+        print("Invalid path.")
