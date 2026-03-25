@@ -1,0 +1,116 @@
+import os
+import shutil
+import time
+
+# ==========================================
+# 1. THE DART LOGGER HEADER 
+# ==========================================
+def get_dart_header():
+    return """// ==========================================
+// DEBUGGER CAPACITANCE ENGINE (V1.0)
+// ==========================================
+import 'dart:io';
+
+class _AD_Debug {
+  static bool active = true;
+  static final File _logFile = File('_COMBINED_LOG.txt');
+  static final File _varFile = File('_VARIABLE_TRACKER.csv');
+
+  static void init() {
+    try {
+      _logFile.writeAsStringSync('--- SESSION START: ${DateTime.now()} ---\\n');
+      _varFile.writeAsStringSync('Line,Variable,Value\\n');
+    } catch (_) {}
+  }
+
+  static void log(String msg, {bool isError = false}) {
+    if (!active) return;
+    try {
+      final timestamp = DateTime.now().toIso8601String();
+      final prefix = isError ? '[DEBUG_ERROR]' : '[SCRIPT]';
+      final formatted = '$prefix [$timestamp] $msg';
+      print(formatted);
+      _logFile.writeAsStringSync('$formatted\\n', mode: FileMode.append);
+    } catch (_) {}
+  }
+}
+// ==========================================
+"""
+
+# ==========================================
+# 2. THE INJECTION ENGINE
+# ==========================================
+def inject_into_dart_file(file_path):
+    try:
+        with open(file_path, 'r', encoding='utf-8') as f:
+            lines = f.readlines()
+
+        new_content = [get_dart_header()]
+
+        for i, line in enumerate(lines):
+            stripped = line.strip()
+            
+            # Skip empty lines, imports, exports, and basic structural braces
+            if (not stripped or 
+                stripped.startswith('import ') or 
+                stripped.startswith('export ') or 
+                stripped.startswith('//') or
+                stripped in ('}', '{')):
+                new_content.append(line.rstrip())
+                continue
+
+            indent_len = len(line) - len(line.lstrip())
+            indent_str = line[:indent_len]
+
+            # Wrap statements in try-catch for state tracking
+            new_content.append(f"{indent_str}try {{")
+            new_content.append(f"{indent_str}  {stripped}")
+            new_content.append(f"{indent_str}  _AD_Debug.log(\"Executed line {i + 1}\");")
+            new_content.append(f"{indent_str}}} catch (e) {{")
+            new_content.append(f"{indent_str}  _AD_Debug.log(\"Line {i + 1} Failed: $e\", isError: true);")
+            new_content.append(f"{indent_str}  rethrow;") # The critical re-raise fix
+            new_content.append(f"{indent_str}}}")
+
+        with open(file_path, 'w', encoding='utf-8') as f:
+            f.write("\n".join(new_content))
+            
+        return True
+    except Exception as e:
+        print(f"Injection Error on {file_path}: {e}")
+        return False
+
+# ==========================================
+# 3. RUNNER
+# ==========================================
+def process_project(source_dir):
+    target_dir = source_dir.rstrip('\\/') + f"_DEBUG_STATE_{int(time.time())}"
+    
+    if not os.path.exists(target_dir): 
+        os.makedirs(target_dir)
+        
+    print(f"\n[START] Building instrumented Dart project...")
+    
+    for root, _, files in os.walk(source_dir):
+        # Ignore common build/version control directories
+        if any(x in root for x in ['.git', '.dart_tool', 'build', 'web']): 
+            continue
+            
+        for file in files:
+            if file.endswith(".dart"):
+                src = os.path.join(root, file)
+                dst = os.path.join(target_dir, os.path.relpath(src, source_dir))
+                
+                os.makedirs(os.path.dirname(dst), exist_ok=True)
+                shutil.copy2(src, dst)
+                
+                if inject_into_dart_file(dst):
+                    print(f"    Instrumented: {file}")
+                    
+    print(f"\n[FINISH] Project ready at: {target_dir}")
+
+if __name__ == "__main__":
+    p = input("Dart/Flutter Project Path: ").strip().strip('"')
+    if os.path.isdir(p):
+        process_project(p)
+    else:
+        print("Invalid path.")
