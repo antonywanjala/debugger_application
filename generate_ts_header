@@ -1,0 +1,149 @@
+import os
+import shutil
+import time
+import re
+
+# ==========================================
+# 1. THE LOGGER HEADER (TS VERSION)
+# ==========================================
+def generate_ts_header():
+    return """
+/* ==========================================
+   STRICT TS WRAPPER + STATE TRACKER (V1.0)
+   ========================================== */
+import * as fs from 'fs';
+import * as path from 'path';
+
+const _AD_DEBUG_ACTIVE = true;
+const _LOG_FILES = ["_DEBUG_ONLY.txt", "_SCRIPT_ONLY.txt", "_COMBINED_LOG.txt"];
+const _VAR_TRACKER = "_VARIABLE_TRACKER.csv";
+
+function _initLogs() {
+    if ((global as any)._AD_LOGS_WIPED) return;
+    const timestamp = new Date().toISOString();
+    _LOG_FILES.forEach(f => {
+        fs.writeFileSync(f, `--- SESSION START: ${timestamp} ---\\n`, 'utf8');
+    });
+    fs.writeFileSync(_VAR_TRACKER, "Line,Variable,Value\\n", 'utf8');
+    (global as any)._AD_LOGS_WIPED = true;
+}
+_initLogs();
+
+function _recordState(lineNo: number, vars: Record<string, any>) {
+    if (!_AD_DEBUG_ACTIVE) return;
+    try {
+        let rows = "";
+        for (const [key, val] of Object.entries(vars)) {
+            if (key.startsWith('_')) continue;
+            const cleanVal = String(val).replace(/\\n/g, ' ').replace(/\\r/g, '');
+            rows += `${lineNo},${key},${cleanVal}\\n`;
+        }
+        fs.appendFileSync(_VAR_TRACKER, rows, 'utf8');
+    } catch (e) {}
+}
+
+function _adLog(msg: string, isError: boolean = true) {
+    if (!_AD_DEBUG_ACTIVE) return;
+    const timestamp = new Date().toLocaleString();
+    const formatted = isError ? `[DEBUG_ERROR] [${timestamp}] ${msg}` : `[SCRIPT] ${msg}`;
+    
+    console.log(formatted);
+    const targets = isError ? ["_DEBUG_ONLY.txt", "_COMBINED_LOG.txt"] : ["_SCRIPT_ONLY.txt", "_COMBINED_LOG.txt"];
+    targets.forEach(f => {
+        try { fs.appendFileSync(f, formatted + "\\n", 'utf8'); } catch(e) {}
+    });
+}
+
+// Override console.log for parity with your Python script
+const _originalLog = console.log;
+console.log = (...args: any[]) => {
+    _adLog(args.join(" "), false);
+};
+/* ========================================== */
+"""
+
+# ==========================================
+# 2. THE INJECTION ENGINE
+# ==========================================
+def inject_into_ts_file(file_path):
+    try:
+        with open(file_path, 'r', encoding='utf-8') as f:
+            lines = f.readlines()
+
+        new_content = [generate_ts_header()]
+        
+        # Keywords that indicate we shouldn't wrap the line in a try-catch
+        structural_keywords = (
+            'import ', 'export ', 'const ', 'let ', 'var ', 'function ', 
+            'class ', 'if ', 'else', 'for ', 'while ', 'try ', 'catch', 
+            'finally', 'return', 'type ', 'interface ', '@', '}'
+        )
+
+        for i, line in enumerate(lines):
+            stripped = line.strip()
+            
+            # Skip empty lines, comments, or structural lines
+            if (not stripped or 
+                stripped.startswith('//') or 
+                stripped.startswith('/*') or 
+                stripped.startswith('*') or
+                any(stripped.startswith(k) for k in structural_keywords) or
+                stripped.endswith('{')):
+                new_content.append(line)
+                continue
+
+            # Identify indentation
+            indent_match = re.match(r'^\s*', line)
+            indent = indent_match.group(0) if indent_match else ""
+
+            # Inject Try-Catch Wrapper
+            # Note: TypeScript doesn't have a simple locals() call. 
+            # We pass {} as a placeholder; manual variable tracking 
+            # in TS usually requires an AST parser or Debugger API.
+            new_content.append(f"{indent}try {{\n")
+            new_content.append(f"{indent}    {stripped}\n")
+            new_content.append(f"{indent}    _recordState({i + 1}, {{}});\n")
+            new_content.append(f"{indent}}} catch (e: any) {{\n")
+            new_content.append(f"{indent}    _adLog(`Line {i + 1} Failed: ${{e.message}}`, true);\n")
+            new_content.append(f"{indent}    throw e;\n")
+            new_content.append(f"{indent}}}\n")
+
+        with open(file_path, 'w', encoding='utf-8') as f:
+            f.writelines(new_content)
+        return True
+    except Exception as e:
+        print(f"Injection Error on {file_path}: {e}")
+        return False
+
+# ==========================================
+# 3. RUNNER
+# ==========================================
+def process_ts_project(source_dir):
+    target_dir = source_dir.rstrip('\\/') + f"_TS_DEBUG_{int(time.time())}"
+    if not os.path.exists(target_dir): os.makedirs(target_dir)
+    
+    print(f"\n[START] Building instrumented TypeScript project...")
+    
+    for root, _, files in os.walk(source_dir):
+        # Ignore common dependency/build folders
+        if any(x in root for x in ['node_modules', '.git', 'dist', 'build']): continue
+        
+        for file in files:
+            if file.endswith(".ts") and not file.endswith(".d.ts"):
+                src = os.path.join(root, file)
+                dst = os.path.join(target_dir, os.path.relpath(src, source_dir))
+                
+                os.makedirs(os.path.dirname(dst), exist_ok=True)
+                shutil.copy2(src, dst)
+                
+                inject_into_ts_file(dst)
+                print(f"    Instrumented: {file}")
+                
+    print(f"\n[FINISH] Project ready at: {target_dir}")
+
+if __name__ == "__main__":
+    p = input("TS Project Path: ").strip().strip('"')
+    if os.path.isdir(p):
+        process_ts_project(p)
+    else:
+        print("Invalid path.")
