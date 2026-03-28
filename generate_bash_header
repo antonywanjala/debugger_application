@@ -1,0 +1,114 @@
+import os
+import shutil
+import time
+
+# ==========================================
+# 1. THE BASH LOGGER HEADER
+# ==========================================
+def generate_bash_header():
+    # This block gets injected into the top of every .sh file
+    return """
+# ==========================================
+# STRICT BASH DEBUG WRAPPER + STATE TRACKER
+# ==========================================
+_AD_DEBUG_LOG="_COMBINED_BASH_LOG.txt"
+_AD_VARS_LOG="_BASH_VARIABLES.log"
+
+# Initialize logs on first run
+if [ -z "${_AD_LOGS_WIPED:-}" ]; then
+    echo "--- SESSION START: $(date) ---" > "$_AD_DEBUG_LOG"
+    echo "--- VARIABLE DUMPS ---" > "$_AD_VARS_LOG"
+    export _AD_LOGS_WIPED=true
+fi
+
+# Override trace output (PS4) to include timestamps, file names, and line numbers
+export PS4='+ [$(date +"%Y-%m-%d %H:%M:%S")] [${BASH_SOURCE:-${0}}:${LINENO}]: '
+
+# Error handler to log failures and dump all local variables
+_ad_error_trap() {
+    local exit_code=$?
+    local line_no=$1
+    echo "[DEBUG_ERROR] [$(date +"%Y-%m-%d %H:%M:%S")] Command failed at line $line_no with exit code $exit_code" >> "$_AD_DEBUG_LOG"
+    echo "--- STATE AT ERROR (Line $line_no) ---" >> "$_AD_VARS_LOG"
+    set >> "$_AD_VARS_LOG" # Dumps the entire environment state (variables + functions)
+}
+
+# Trap ERR so the function runs immediately if any command fails
+trap '_ad_error_trap $LINENO' ERR
+
+# Redirect standard output and error to both the console and the log file
+exec > >(tee -a "$_AD_DEBUG_LOG") 2>&1
+
+# Enable strict mode and execution tracing
+# -x: Trace commands
+# -e: Exit on error
+# -E: Inherit traps in functions
+# -u: Treat unset variables as errors
+# -o pipefail: Catch failures in pipelines
+set -xeeuo pipefail
+# ==========================================
+"""
+
+# ==========================================
+# 2. THE INJECTION ENGINE
+# ==========================================
+def inject_into_bash_file(file_path):
+    try:
+        with open(file_path, 'r', encoding='utf-8') as f:
+            lines = f.readlines()
+
+        # Determine where to safely inject the header
+        insert_idx = 0
+        if lines and lines.startswith("#!"):
+            insert_idx = 1 # Inject immediately after the shebang
+
+        # Insert the header
+        lines.insert(insert_idx, generate_bash_header())
+
+        # Write it back out, preserving Bash's newline expectations
+        with open(file_path, 'w', encoding='utf-8', newline='\n') as f:
+            f.writelines(lines)
+        return True
+    except Exception as e:
+        print(f"[ERROR] Injection failed on {file_path}: {e}")
+        return False
+
+# ==========================================
+# 3. RUNNER
+# ==========================================
+def process_project(source_dir):
+    # Create an isolated debug directory
+    target_dir = source_dir.rstrip('\\/') + f"_BASH_DEBUG_{int(time.time())}"
+    if not os.path.exists(target_dir): 
+        os.makedirs(target_dir)
+        
+    print(f"\n[START] Building instrumented Bash project...")
+    
+    count = 0
+    for root, _, files in os.walk(source_dir):
+        # Ignore common non-script directories
+        if any(x in root for x in ['.git', 'node_modules', '__pycache__']): 
+            continue
+            
+        for file in files:
+            # Only target shell scripts
+            if file.endswith(".sh"):
+                src = os.path.join(root, file)
+                dst = os.path.join(target_dir, os.path.relpath(src, source_dir))
+                
+                os.makedirs(os.path.dirname(dst), exist_ok=True)
+                shutil.copy2(src, dst)
+                
+                if inject_into_bash_file(dst):
+                    print(f"    [OK] Instrumented: {file}")
+                    count += 1
+                    
+    print(f"\n[FINISH] Project ready at: {target_dir}")
+    print(f"Instrumented {count} script(s).")
+
+if __name__ == "__main__":
+    p = input("Bash Project Path: ").strip().strip('"')
+    if os.path.isdir(p):
+        process_project(p)
+    else:
+        print("Invalid directory path.")
