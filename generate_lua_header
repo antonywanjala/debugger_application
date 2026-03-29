@@ -1,0 +1,190 @@
+import os
+import shutil
+import time
+import re
+
+# ==========================================
+# 1. THE LUA LOGGER HEADER GENERATOR
+# ==========================================
+def generate_lua_header():
+    """Generates the Lua code to be injected at the top of each file."""
+    return """
+-- ==========================================
+-- STRICT RECURSIVE WRAPPER + STATE TRACKER (LUA V1.0)
+-- ==========================================
+local _AD_DEBUG_ACTIVE = true
+local _ORIGINAL_PRINT = print
+
+local function _reset_logs()
+    local log_files = {"_DEBUG_ONLY.txt", "_SCRIPT_ONLY.txt", "_COMBINED_LOG.txt"}
+    for _, f_name in ipairs(log_files) do
+        local f = io.open(f_name, "w")
+        if f then 
+            f:write("--- SESSION START: " .. os.date() .. " ---\\n") 
+            f:close() 
+        end
+    end
+    local f = io.open("_VARIABLE_TRACKER.csv", "w")
+    if f then
+        f:write("Line,Variable,Value\\n")
+        f:close()
+    end
+end
+
+if not _AD_GLOBAL_LOGS_WIPED then
+    _reset_logs()
+    _AD_GLOBAL_LOGS_WIPED = true
+end
+
+local function _record_state(line_no)
+    if not _AD_DEBUG_ACTIVE then return end
+    local f = io.open("_VARIABLE_TRACKER.csv", "a")
+    if f then
+        local i = 1
+        while true do
+            -- Look at stack level 2 (the caller of _record_state)
+            local name, value = debug.getlocal(2, i)
+            if not name then break end
+            -- Ignore internal variables starting with underscores
+            if not name:find("^_") then
+                local clean_val = tostring(value):gsub("\\n", " "):gsub("\\r", "")
+                f:write(string.format("%d,%s,%s\\n", line_no, name, clean_val))
+            end
+            i = i + 1
+        end
+        f:close()
+    end
+end
+
+local function _ad_script_output(msg, is_error)
+    if not _AD_DEBUG_ACTIVE then return end
+    local timestamp = os.date("%Y-%m-%d %H:%M:%S")
+    local prefix = is_error and "[DEBUG_ERROR]" or "[SCRIPT]"
+    local formatted = string.format("%s [%s] %s", prefix, timestamp, msg)
+
+    _ORIGINAL_PRINT(formatted)
+
+    local targets = is_error and {"_DEBUG_ONLY.txt", "_COMBINED_LOG.txt"} or {"_SCRIPT_ONLY.txt", "_COMBINED_LOG.txt"}
+    for _, f_name in ipairs(targets) do
+        local f = io.open(f_name, "a")
+        if f then f:write(formatted .. "\\n") f:close() end
+    end
+end
+
+-- Override global print
+print = function(...)
+    local args = {...}
+    local str_args = {}
+    for i, v in ipairs(args) do table.insert(str_args, tostring(v)) end
+    _ad_script_output(table.concat(str_args, " "), false)
+end
+-- ==========================================
+"""
+
+# ==========================================
+# 2. THE LUA PRE-PROCESSOR
+# ==========================================
+def clean_lua_source(source):
+    """
+    Removes Lua comments to prevent injecting code into commented-out lines.
+    Handles -- and --[[ ]] formats.
+    """
+    # Remove multi-line comments
+    source = re.sub(r'--\[\[.*?\]\]', '', source, flags=re.DOTALL)
+    # Remove single-line comments
+    lines = [re.sub(r'--.*$', '', line) for line in source.splitlines()]
+    return "\n".join(lines)
+
+# ==========================================
+# 3. THE INJECTION ENGINE (LUA ADAPTED)
+# ==========================================
+def inject_into_lua_file(file_path, max_depth=3):
+    try:
+        with open(file_path, 'r', encoding='utf-8') as f:
+            raw_content = f.read()
+
+        clean_content = clean_lua_source(raw_content)
+        lines = clean_content.splitlines()
+        new_content = [generate_lua_header()]
+        
+        # Lua structures that should NOT be wrapped in pcall
+        structural_keywords = (
+            'if ', 'else', 'elseif', 'for ', 'while ', 'repeat', 
+            'function', 'local function', 'do', 'return', 'then', 'until'
+        )
+
+        for i, line in enumerate(lines):
+            stripped = line.strip()
+            
+            # Skip empty lines or control closers
+            if not stripped or stripped == "end" or stripped == "}" or stripped == ");":
+                new_content.append(line)
+                continue
+
+            indent_len = len(line) - len(line.lstrip())
+            indent_str = line[:indent_len]
+            
+            # Check if line is structural
+            is_structural = any(stripped.startswith(k) for k in structural_keywords) or stripped:find("=") == -1
+
+            # Only instrument if not structural and within depth limits
+            if not is_structural and (indent_len // 4) <= max_depth:
+                # Wrap the line in a Lua pcall (Protected Call)
+                new_content.append(f"{indent_str}local _ok, _err = pcall(function()")
+                new_content.append(f"{indent_str}    {stripped}")
+                new_content.append(f"{indent_str}    _record_state({i + 1})")
+                new_content.append(f"{indent_str}end)")
+                new_content.append(f"{indent_str}if not _ok then")
+                new_content.append(f"{indent_str}    _ad_script_output('Line {i + 1} Failed: ' .. tostring(_err), true)")
+                new_content.append(f"{indent_str}    error(_err) -- Re-raise to original scope")
+                new_content.append(f"{indent_str}end")
+            else:
+                new_content.append(line)
+
+        with open(file_path, 'w', encoding='utf-8') as f:
+            f.write("\n".join(new_content))
+        return True
+    except Exception as e:
+        print(f"Injection Error on {file_path}: {e}")
+        return False
+
+# ==========================================
+# 4. RUNNER
+# ==========================================
+def process_project(source_dir, max_depth):
+    # Create a timestamped debug folder
+    target_dir = source_dir.rstrip('\\/') + f"_LUA_DEBUG_{int(time.time())}"
+    if not os.path.exists(target_dir): os.makedirs(target_dir)
+    
+    print(f"\n[START] Building instrumented Lua project...")
+    
+    for root, _, files in os.walk(source_dir):
+        # Skip common non-source directories
+        if any(x in root for x in ['.git', 'node_modules', 'bin', 'obj']): continue
+        
+        for file in files:
+            if file.endswith(".lua"):
+                src = os.path.join(root, file)
+                # Maintain folder structure in the target directory
+                dst = os.path.join(target_dir, os.path.relpath(src, source_dir))
+                os.makedirs(os.path.dirname(dst), exist_ok=True)
+                
+                shutil.copy2(src, dst)
+                if inject_into_lua_file(dst, max_depth):
+                    print(f"    Instrumented: {file}")
+                else:
+                    print(f"    FAILED: {file}")
+                    
+    print(f"\n[FINISH] Project ready at: {target_dir}")
+
+if __name__ == "__main__":
+    path = input("Lua Project Path: ").strip().strip('"')
+    try:
+        depth = int(input("Max Depth (default 3): ").strip() or 3)
+    except ValueError:
+        depth = 3
+        
+    if os.path.isdir(path):
+        process_project(path, depth)
+    else:
+        print("Error: Invalid directory path.")
