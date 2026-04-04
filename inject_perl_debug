@@ -1,0 +1,40 @@
+import re
+import os
+
+def inject_perl_debug(file_path):
+    with open(file_path, 'r') as f:
+        lines = f.readlines()
+
+    new_code = []
+    # 1. Inject the Header (Logger Function)
+    new_code.append("use Data::Dumper; $Data::Dumper::Indent = 0;\n")
+    new_code.append("sub _TRACE { my ($l, $n, $v) = @_; open(my $fh, '>>', '_debug.log'); ")
+    new_code.append("print $fh \"[DEBUG] Line $l: $n => \" . Dumper($v) . \"\\n\"; close($fh); }\n")
+
+    # 2. Inject Probes after assignments
+    # Regex looks for: $variable = something;
+    assign_pattern = re.compile(r'(\$\w+)\s*=\s*[^;]+;')
+
+    for i, line in enumerate(lines):
+        new_code.append(line)
+        
+        # Skip comments or existing trace calls
+        if line.strip().startswith('#') or '_TRACE' in line:
+            continue
+            
+        match = assign_pattern.search(line)
+        if match:
+            var_name = match.group(1)
+            # Inject the trace call immediately after the assignment line
+            indent = re.match(r"^\s*", line).group(0)
+            new_code.append(f"{indent}_TRACE({i+1}, '{var_name}', {var_name});\n")
+
+    # 3. Write to a debug version of the file
+    debug_file = file_path.replace(".pl", "_DEBUG.pl")
+    with open(debug_file, 'w') as f:
+        f.writelines(new_code)
+    
+    print(f"Instrumented script created: {debug_file}")
+
+if __name__ == "__main__":
+    inject_perl_debug("my_script.pl")
