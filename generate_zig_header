@@ -1,0 +1,133 @@
+import os
+import shutil
+import time
+
+# ==========================================
+# 1. THE ZIG DEBUG HEADER
+# ==========================================
+def generate_zig_header():
+    return """
+// ==========================================
+// ZIG STATE TRACKER & DEBUG WRAPPER
+// ==========================================
+const std = @import("std");
+
+fn _ad_record_state(line: u32, name: []const u8, value: anytype) void {
+    const file_name = "_VARIABLE_TRACKER.csv";
+    const file = std.fs.cwd().createFile(file_name, .{ .truncate = false }) catch return;
+    defer file.close();
+    
+    file.seekFromEnd(0) catch {};
+    var writer = file.writer();
+    
+    // Simple CSV Append: Line, Variable, Value
+    writer.print("{d},\\"{s}\\",\\"{any}\\"\\n", .{ line, name, value }) catch {};
+}
+
+fn _ad_log_msg(comptime fmt: []const u8, args: anytype) void {
+    const stdout = std.io.getStdOut().writer();
+    stdout.print("[DEBUG] " ++ fmt ++ "\\n", args) catch {};
+}
+// ==========================================
+"""
+
+# ==========================================
+# 2. THE ZIG PRE-PROCESSOR (Simplified)
+# ==========================================
+def clean_zig_source(source):
+    # Removes block comments to avoid instrumentation inside dead text
+    # Zig doesn't have triple quotes, but has multi-line strings (\\)
+    lines = source.splitlines()
+    cleaned = []
+    for line in lines:
+        if line.strip().startswith("//"):
+            cleaned.append("") # Keep line count consistent
+        else:
+            cleaned.append(line)
+    return "\n".join(cleaned)
+
+# ==========================================
+# 3. THE INJECTION ENGINE
+# ==========================================
+def inject_into_zig(file_path, max_depth=3):
+    try:
+        with open(file_path, 'r', encoding='utf-8') as f:
+            lines = f.readlines()
+
+        new_content = [generate_zig_header()]
+        
+        for i, line in enumerate(lines):
+            stripped = line.strip()
+            indent = line[:len(line) - len(line.lstrip())]
+            depth = len(indent) // 4
+
+            # Don't instrument imports, constant declarations, or empty lines
+            is_skippable = (
+                not stripped or 
+                stripped.startswith("const") or 
+                stripped.startswith("import") or
+                stripped.startswith("pub const") or
+                stripped.startswith("usingnamespace") or
+                "{" in stripped or "}" in stripped
+            )
+
+            new_content.append(line)
+
+            # Logic: If it looks like an assignment or a function call at low depth
+            if not is_skippable and depth <= max_depth:
+                # If it's an assignment, try to log the variable
+                if "=" in stripped and ";" in stripped:
+                    var_name = stripped.split("=").replace("var", "").replace("const", "").strip()
+                    # Inject state recording after the line
+                    new_content.append(f"{indent}_ad_record_state({i+1}, \"{var_name}\", {var_name});\n")
+                
+                # General execution heartbeat
+                new_content.append(f"{indent}_ad_log_msg(\"Passed Line {{d}}\", .{{{i+1}}});\n")
+
+        with open(file_path, 'w', encoding='utf-8') as f:
+            f.writelines(new_content)
+        return True
+    except Exception as e:
+        print(f"Injection Error on {file_path}: {e}")
+        return False
+
+# ==========================================
+# 4. RUNNER
+# ==========================================
+def process_zig_project(source_dir, max_depth):
+    timestamp = int(time.time())
+    target_dir = source_dir.rstrip('\\/') + f"_ZIG_DEBUG_{timestamp}"
+    
+    if not os.path.exists(target_dir):
+        os.makedirs(target_dir)
+
+    print(f"\n[START] Instrumenting Zig project...")
+    
+    for root, _, files in os.walk(source_dir):
+        if 'zig-cache' in root or 'zig-out' in root or '.git' in root:
+            continue
+            
+        for file in files:
+            if file.endswith(".zig"):
+                src = os.path.join(root, file)
+                dst = os.path.join(target_dir, os.path.relpath(src, source_dir))
+                
+                os.makedirs(os.path.dirname(dst), exist_ok=True)
+                shutil.copy2(src, dst)
+                inject_into_zig(dst, max_depth)
+                print(f"    Instrumented: {file}")
+
+    print(f"\n[FINISH] Instrumented code: {target_dir}")
+    print("Note: You may need to add 'std' imports if the script didn't detect them.")
+
+if __name__ == "__main__":
+    p = input("Zig Project Path: ").strip().strip('"')
+    try:
+        d = int(input("Max Depth (default 2): ").strip() or 2)
+    except:
+        d = 2
+        
+    if os.path.isdir(p):
+        process_zig_project(p, d)
+    else:
+        print("Invalid path.")
