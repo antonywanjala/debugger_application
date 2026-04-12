@@ -1,0 +1,132 @@
+import os
+import shutil
+import time
+import re
+
+# ==========================================
+# 1. THE JULIA DEBUG HEADER
+# ==========================================
+def generate_julia_header():
+    return """
+# ==========================================
+# JULIA STATE TRACKER & DEBUG WRAPPER
+# ==========================================
+using DelimitedFiles
+
+function _ad_record_state(line, name, value)
+    file_name = "_VARIABLE_TRACKER.csv"
+    try
+        open(file_name, "a") do io
+            # Append: Line, Variable, Value (stringified)
+            writedlm(io, [line name string(value)], ',')
+        end
+    catch e
+        # Silently fail if IO is locked
+    end
+end
+
+function _ad_log_msg(msg, args...)
+    println("[DEBUG] ", msg, " ", args...)
+end
+# ==========================================
+"""
+
+# ==========================================
+# 2. THE JULIA PRE-PROCESSOR
+# ==========================================
+def clean_julia_source(source):
+    # Removes block comments (#= ... =#) to avoid instrumenting dead code
+    return re.sub(r'#=.*?=#', '', source, flags=re.DOTALL)
+
+# ==========================================
+# 3. THE INJECTION ENGINE
+# ==========================================
+def inject_into_julia(file_path, max_depth=3):
+    try:
+        with open(file_path, 'r', encoding='utf-8') as f:
+            lines = f.readlines()
+
+        new_content = [generate_julia_header()]
+        
+        for i, line in enumerate(lines):
+            stripped = line.strip()
+            # Calculate indent (Julia typically uses 4 spaces)
+            indent_match = re.match(r'^\s*', line)
+            indent = indent_match.group(0) if indent_match else ""
+            depth = len(indent) // 4
+
+            # Don't instrument imports, markers, or boilerplate
+            is_skippable = (
+                not stripped or 
+                stripped.startswith("#") or 
+                stripped.startswith("using") or
+                stripped.startswith("import") or
+                stripped.startswith("export") or
+                stripped.startswith("end") or
+                stripped.startswith("module")
+            )
+
+            new_content.append(line)
+
+            if not is_skippable and depth <= max_depth:
+                # 1. Detect Assignments: name = value
+                # Regex looks for word characters followed by = (but not == or !=)
+                assign_match = re.match(r'^([a-zA-Z_][a-zA-Z0-9_]*)\s*=[^=]', stripped)
+                
+                if assign_match:
+                    var_name = assign_match.group(1)
+                    # Inject state recording AFTER the line executes
+                    new_content.append(f"{indent}_ad_record_state({i+1}, \"{var_name}\", {var_name})\n")
+                
+                # 2. Execution heartbeat
+                new_content.append(f"{indent}_ad_log_msg(\"Passed Line {i+1}\")\n")
+
+        with open(file_path, 'w', encoding='utf-8') as f:
+            f.writelines(new_content)
+        return True
+    except Exception as e:
+        print(f"Injection Error on {file_path}: {e}")
+        return False
+
+# ==========================================
+# 4. RUNNER
+# ==========================================
+def process_julia_project(source_dir, max_depth):
+    timestamp = int(time.time())
+    target_dir = source_dir.rstrip('\\/') + f"_JULIA_DEBUG_{timestamp}"
+    
+    if not os.path.exists(target_dir):
+        os.makedirs(target_dir)
+
+    print(f"\n[START] Instrumenting Julia project...")
+    
+    for root, _, files in os.walk(source_dir):
+        # Skip common non-source directories
+        if any(skip in root for skip in ['.git', '.julia', 'deps', 'build']):
+            continue
+            
+        for file in files:
+            if file.endswith(".jl"):
+                src = os.path.join(root, file)
+                dst = os.path.join(target_dir, os.path.relpath(src, source_dir))
+                
+                os.makedirs(os.path.dirname(dst), exist_ok=True)
+                shutil.copy2(src, dst)
+                inject_into_julia(dst, max_depth)
+                print(f"    Instrumented: {file}")
+
+    print(f"\n[FINISH] Instrumented code: {target_dir}")
+    print("How to use: Run your main .jl file from the new directory.")
+    print("Check '_VARIABLE_TRACKER.csv' for the execution trace.")
+
+if __name__ == "__main__":
+    p = input("Julia Project Path: ").strip().strip('"')
+    try:
+        d = int(input("Max Depth (default 2): ").strip() or 2)
+    except ValueError:
+        d = 2
+        
+    if os.path.isdir(p):
+        process_julia_project(p, d)
+    else:
+        print("Invalid path.")
