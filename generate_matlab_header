@@ -1,0 +1,142 @@
+import os
+import shutil
+import time
+import re
+
+# ==========================================
+# 1. THE MATLAB LOGGER HEADER
+# ==========================================
+def generate_matlab_header():
+    return """
+% ==========================================
+% MATLAB STATE TRACKER & LOGGER
+% ==========================================
+if ~exist('_AD_DEBUG_INITIALIZED', 'var')
+    _AD_DEBUG_LOG_FILES = {'_DEBUG_ONLY.txt', '_SCRIPT_ONLY.txt', '_COMBINED_LOG.txt'};
+    for i = 1:length(_AD_DEBUG_LOG_FILES)
+        fid = fopen(_AD_DEBUG_LOG_FILES{i}, 'w');
+        if fid ~= -1
+            fprintf(fid, '--- SESSION START: %s ---\\n', datestr(now));
+            fclose(fid);
+        end
+    end
+    
+    % Initialize CSV Tracker
+    fid = fopen('_VARIABLE_TRACKER.csv', 'w');
+    if fid ~= -1
+        fprintf(fid, 'Line,Variable,Value\\n');
+        fclose(fid);
+    end
+    _AD_DEBUG_INITIALIZED = true;
+end
+
+function _record_matlab_state(line_no, vars_struct)
+    fid = fopen('_VARIABLE_TRACKER.csv', 'a');
+    if fid == -1, return; end
+    f_names = fieldnames(vars_struct);
+    for i = 1:length(f_names)
+        name = f_names{i};
+        if startsWith(name, '_'), continue; end
+        val = vars_struct.(name);
+        % Convert value to string and strip newlines
+        val_str = strrep(strrep(strtrim(evalc('disp(val)')), sprintf('\\n'), ' '), ',', ';');
+        fprintf(fid, '%d,%s,%s\\n', line_no, name, val_str);
+    end
+    fclose(fid);
+end
+
+function _ad_log_output(msg, is_error)
+    timestamp = datestr(now, 'yyyy-mm-dd HH:MM:SS');
+    if is_error
+        formatted = sprintf('[DEBUG_ERROR] [%s] %s', timestamp, msg);
+        targets = {'_DEBUG_ONLY.txt', '_COMBINED_LOG.txt'};
+    else
+        formatted = sprintf('[SCRIPT] %s', msg);
+        targets = {'_SCRIPT_ONLY.txt', '_COMBINED_LOG.txt'};
+    end
+    
+    disp(formatted);
+    for i = 1:length(targets)
+        fid = fopen(targets{i}, 'a');
+        if fid ~= -1
+            fprintf(fid, '%s\\n', formatted);
+            fclose(fid);
+        end
+    end
+end
+% ==========================================
+"""
+
+# ==========================================
+# 2. THE INJECTION ENGINE
+# ==========================================
+def inject_into_matlab(file_path):
+    try:
+        with open(file_path, 'r', encoding='utf-8') as f:
+            lines = f.readlines()
+
+        new_content = [generate_matlab_header()]
+        
+        # Keywords that shouldn't be wrapped in try/catch
+        structural = ('function', 'if', 'else', 'elseif', 'end', 'for', 'while', 'switch', 'case', 'otherwise', 'properties', 'methods', 'classdef')
+
+        for i, line in enumerate(lines):
+            stripped = line.strip()
+            # Skip empty lines or pure comments
+            if not stripped or stripped.startswith('%'):
+                new_content.append(line)
+                continue
+            
+            # Check if line is structural
+            is_structural = any(stripped.lower().startswith(k) for k in structural)
+            
+            if not is_structural and '=' in stripped:
+                indent = line[:line.find(stripped)]
+                # Wrap in try-catch to log state and errors
+                new_content.append(f"{indent}try\n")
+                new_content.append(f"{indent}    {stripped}\n")
+                # MATLAB 'workspace' variables are accessed via 'whos' and 'evalin' 
+                # but for simplicity, we capture current scope variables
+                new_content.append(f"{indent}    _vars = whos; _s = struct();\n")
+                new_content.append(f"{indent}    for _idx = 1:length(_vars), if ~startsWith(_vars(_idx).name, '_'), _s.(_vars(_idx).name) = eval(_vars(_idx).name); end; end\n")
+                new_content.append(f"{indent}    _record_matlab_state({i+1}, _s);\n")
+                new_content.append(f"{indent}catch _err\n")
+                new_content.append(f"{indent}    _ad_log_output(sprintf('Line {i+1} Failed: %s', _err.message), true);\n")
+                new_content.append(f"{indent}    rethrow(_err);\n")
+                new_content.append(f"{indent}end\n")
+            else:
+                new_content.append(line)
+
+        with open(file_path, 'w', encoding='utf-8') as f:
+            f.writelines(new_content)
+        return True
+    except Exception as e:
+        print(f"Injection Error on {file_path}: {e}")
+        return False
+
+# ==========================================
+# 3. RUNNER
+# ==========================================
+def process_matlab_project(source_dir):
+    target_dir = source_dir.rstrip('\\/') + f"_MATLAB_DEBUG_{int(time.time())}"
+    if not os.path.exists(target_dir): os.makedirs(target_dir)
+    
+    print(f"\n[START] Instrumenting MATLAB project...")
+    for root, _, files in os.walk(source_dir):
+        for file in files:
+            if file.endswith(".m"):
+                src = os.path.join(root, file)
+                dst = os.path.join(target_dir, os.path.relpath(src, source_dir))
+                os.makedirs(os.path.dirname(dst), exist_ok=True)
+                shutil.copy2(src, dst)
+                inject_into_matlab(dst)
+                print(f"    Instrumented: {file}")
+    
+    print(f"\n[FINISH] Instrumented project ready at: {target_dir}")
+
+if __name__ == "__main__":
+    path = input("MATLAB Project Path: ").strip().strip('"')
+    if os.path.isdir(path):
+        process_matlab_project(path)
+    else:
+        print("Invalid path.")
