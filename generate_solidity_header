@@ -1,0 +1,107 @@
+import os
+import shutil
+import time
+import re
+
+# ==========================================
+# 1. THE SOLIDITY HEADER (Events & Console)
+# ==========================================
+def generate_solidity_header():
+    """
+    Returns the necessary imports and event definitions for 
+    tracking state within the contract.
+    """
+    return """
+// --- DEBUG INSTRUMENTATION START ---
+import "hardhat/console.sol";
+
+abstract def DebugTracker {
+    event StateLog(uint256 line, string varName, string value);
+}
+// --- DEBUG INSTRUMENTATION END ---
+"""
+
+# ==========================================
+# 2. THE INJECTION ENGINE (Solidity Logic)
+# ==========================================
+def inject_into_solidity(file_path):
+    try:
+        with open(file_path, 'r', encoding='utf-8') as f:
+            lines = f.readlines()
+
+        new_content = []
+        # Inject the console import at the top (after pragma)
+        has_pragma = False
+        
+        for i, line in enumerate(lines):
+            stripped = line.strip()
+            
+            # Add header after the pragma statement
+            if "pragma solidity" in stripped and not has_pragma:
+                new_content.append(line)
+                new_content.append('import "hardhat/console.sol";\n')
+                has_pragma = True
+                continue
+
+            # Skip comments and empty lines
+            if not stripped or stripped.startswith("//") or stripped.startswith("/*"):
+                new_content.append(line)
+                continue
+
+            # Inject console.log for assignments or state changes
+            # Matches: variable = value;
+            if "=" in stripped and ";" in stripped and "==" not in stripped:
+                indent = line[:line.find(line.lstrip())]
+                # Extract variable name (simple regex)
+                var_match = re.search(r'(\w+)\s*=', stripped)
+                if var_match:
+                    var_name = var_match.group(1)
+                    new_content.append(line)
+                    # We inject a console log to track the line and value
+                    new_content.append(f'{indent}console.log("LINE {i+1} | {var_name}:", {var_name});\n')
+                else:
+                    new_content.append(line)
+            else:
+                new_content.append(line)
+
+        with open(file_path, 'w', encoding='utf-8') as f:
+            f.writelines(new_content)
+        return True
+    except Exception as e:
+        print(f"Injection Error on {file_path}: {e}")
+        return False
+
+# ==========================================
+# 3. RUNNER
+# ==========================================
+def process_solidity_project(source_dir):
+    # Create a unique debug folder to avoid overwriting original source
+    target_dir = source_dir.rstrip('\\/') + f"_SOL_DEBUG_{int(time.time())}"
+    
+    print(f"\n[START] Instrumenting Solidity project...")
+    
+    for root, _, files in os.walk(source_dir):
+        # Ignore dependency folders
+        if any(x in root for x in ['node_modules', 'artifacts', 'cache', '.git']):
+            continue
+            
+        for file in files:
+            if file.endswith(".sol"):
+                src = os.path.join(root, file)
+                dst = os.path.join(target_dir, os.path.relpath(src, source_dir))
+                
+                os.makedirs(os.path.dirname(dst), exist_ok=True)
+                shutil.copy2(src, dst)
+                
+                if inject_into_solidity(dst):
+                    print(f"    Instrumented: {file}")
+
+    print(f"\n[FINISH] Instrumented contracts ready at: {target_dir}")
+    print("Note: Ensure you are using Hardhat to see console.log output during tests.")
+
+if __name__ == "__main__":
+    path = input("Enter Solidity Project Path (e.g., ./contracts): ").strip().strip('"')
+    if os.path.isdir(path):
+        process_solidity_project(path)
+    else:
+        print("Invalid path.")
