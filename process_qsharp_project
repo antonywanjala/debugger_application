@@ -1,0 +1,105 @@
+import os
+import shutil
+import time
+import re
+
+# ==========================================
+# 1. THE Q# LOGGER SNIPPET
+# ==========================================
+# This is a helper Q# function we inject to handle logging
+QSHARP_HELPER = """
+    operation _RecordState(label : String, valStr : String) : Unit {
+        Message($"[STATE_TRACKER] {label}: {valStr}");
+    }
+"""
+
+# ==========================================
+# 2. THE Q# PRE-PROCESSOR
+# ==========================================
+def instrument_qsharp_line(line, line_no):
+    """
+    Instruments Q# lines. Since Q# is statically typed, we look for 
+    variable assignments (mutable or let) to track.
+    """
+    stripped = line.strip()
+    
+    # Ignore comments, empty lines, and structural keywords
+    if not stripped or stripped.startswith("//") or stripped.startswith("namespace"):
+        return [line]
+
+    # Pattern to find 'let x = ...' or 'mutable y = ...'
+    # Captures the variable name
+    match = re.search(r'(?:let|mutable)\s+([a-zA-Z_][a-zA-Z0-9_]*)', stripped)
+    
+    if match:
+        var_name = match.group(1)
+        # In Q#, we use Message for logging. 
+        # Note: We must be careful with types; we'll attempt to interpolate.
+        indent = line[:line.find(stripped)]
+        debug_line = f"{indent}Message($\"[DEBUG] Line {line_no}: {var_name} = {{{var_name}}}\");"
+        return [line, debug_line]
+    
+    return [line]
+
+# ==========================================
+# 3. THE INJECTION ENGINE
+# ==========================================
+def inject_into_qsharp(file_path):
+    try:
+        with open(file_path, 'r', encoding='utf-8') as f:
+            lines = f.readlines()
+
+        new_content = []
+        for i, line in enumerate(lines):
+            # Process each line for instrumentation
+            instrumented = instrument_qsharp_line(line, i + 1)
+            new_content.extend(instrumented)
+
+        # Write back the instrumented Q# code
+        with open(file_path, 'w', encoding='utf-8') as f:
+            f.writelines(new_content)
+        return True
+    except Exception as e:
+        print(f"Injection Error in {file_path}: {e}")
+        return False
+
+# ==========================================
+# 4. RUNNER (Adapted for .qs files)
+# ==========================================
+def process_qsharp_project(source_dir):
+    # Create a unique debug directory
+    timestamp = int(time.time())
+    target_dir = source_dir.rstrip('\\/') + f"_QS_DEBUG_{timestamp}"
+    
+    if not os.path.exists(target_dir): 
+        os.makedirs(target_dir)
+        
+    print(f"\n[START] Instrumenting Q# project...")
+    
+    for root, _, files in os.walk(source_dir):
+        # Skip common non-source folders
+        if any(x in root for x in ['bin', 'obj', '.pytest_cache']): continue
+        
+        for file in files:
+            src = os.path.join(root, file)
+            dst = os.path.join(target_dir, os.path.relpath(src, source_dir))
+            os.makedirs(os.path.dirname(dst), exist_ok=True)
+            
+            shutil.copy2(src, dst)
+            
+            if file.endswith(".qs"):
+                inject_into_qsharp(dst)
+                print(f"    Instrumented Q# File: {file}")
+            elif file.endswith(".py"):
+                # If there's a Python host script, we keep it as is
+                print(f"    Copied Host Script: {file}")
+
+    print(f"\n[FINISH] Instrumented project ready at: {target_dir}")
+    print("Run the entry point file within the new folder to see debug logs.")
+
+if __name__ == "__main__":
+    p = input("Q# Project Path: ").strip().strip('"')
+    if os.path.isdir(p):
+        process_qsharp_project(p)
+    else:
+        print("Invalid path. Please provide a directory containing .qs files.")
