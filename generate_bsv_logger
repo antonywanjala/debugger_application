@@ -1,0 +1,117 @@
+import os
+import shutil
+import time
+import re
+
+# ==========================================
+# 1. THE BSV LOGGER MODULE
+# ==========================================
+def generate_bsv_logger():
+    return """
+// ==========================================
+// BSV DEBUG LOGGER (AUTO-GENERATED)
+// ==========================================
+package BsvDebugLogger;
+
+import fshow::*;
+
+function Action debug_log(String tag, String msg);
+    return action
+        $display("[%0d] [DEBUG_%s] %s", $time, tag, msg);
+    endaction;
+endfunction
+
+endpackage
+"""
+
+# ==========================================
+# 2. THE BSV INJECTION ENGINE
+# ==========================================
+def inject_into_bsv(file_path):
+    try:
+        with open(file_path, 'r', encoding='utf-8') as f:
+            lines = f.readlines()
+
+        new_content = []
+        import_added = False
+        
+        # Regex to find Rules and Methods
+        rule_pattern = re.compile(r"^\s*rule\s+(\w+)")
+        method_pattern = re.compile(r"^\s*method\s+.*?\s+(\w+)\(.*\)")
+
+        for i, line in enumerate(lines):
+            stripped = line.strip()
+            
+            # 1. Add the debug package import
+            if not import_added and "package" in line:
+                new_content.append(line)
+                new_content.append("import BsvDebugLogger::*;\n")
+                import_added = True
+                continue
+
+            new_content.append(line)
+
+            # 2. Inject into Rules
+            rule_match = rule_pattern.match(line)
+            if rule_match:
+                rule_name = rule_match.group(1)
+                # Find the next 'begin' or start of rule body
+                new_content.append(f'    $display("[RULE_FIRE] %0d: {rule_name} triggered", $time);\n')
+
+            # 3. Inject into Methods (Action or ActionValue)
+            method_match = method_pattern.match(line)
+            if method_match and ("Action" in line):
+                method_name = method_match.group(1)
+                new_content.append(f'    $display("[METHOD_CALL] %0d: {method_name} invoked", $time);\n')
+
+        with open(file_path, 'w', encoding='utf-8') as f:
+            f.writelines(new_content)
+        return True
+    except Exception as e:
+        print(f"Injection Error in {file_path}: {e}")
+        return False
+
+# ==========================================
+# 3. RUNNER
+# ==========================================
+def process_bsv_project(source_dir):
+    # Create a unique debug directory
+    timestamp = int(time.time())
+    target_dir = source_dir.rstrip('\\/') + f"_BSV_DEBUG_{timestamp}"
+    
+    if not os.path.exists(target_dir):
+        os.makedirs(target_dir)
+    
+    print(f"\n[START] Instrumenting Bluespec Project...")
+    
+    # 1. Create the Logger Utility file
+    logger_path = os.path.join(target_dir, "BsvDebugLogger.bsv")
+    with open(logger_path, "w") as f:
+        f.write(generate_bsv_logger())
+    print(f"    Created: BsvDebugLogger.bsv")
+
+    # 2. Process all .bsv files
+    for root, _, files in os.walk(source_dir):
+        # Skip build directories
+        if any(x in root for x in ['build', '.git', 'obj']): continue
+        
+        for file in files:
+            if file.endswith(".bsv"):
+                src = os.path.join(root, file)
+                dst = os.path.join(target_dir, os.path.relpath(src, source_dir))
+                
+                os.makedirs(os.path.dirname(dst), exist_ok=True)
+                shutil.copy2(src, dst)
+                
+                if inject_into_bsv(dst):
+                    print(f"    Instrumented: {file}")
+
+    print(f"\n[FINISH] Instrumented project ready at: {target_dir}")
+    print("Note: Ensure BsvDebugLogger.bsv is included in your bsc compilation command.")
+
+if __name__ == "__main__":
+    path = input("Bluespec Project Path: ").strip().strip('"')
+    if os.path.isdir(path):
+        process_bsv_project(path)
+    else:
+        print("Invalid directory.")
