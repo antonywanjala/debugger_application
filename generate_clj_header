@@ -1,0 +1,109 @@
+import os
+import shutil
+import time
+import re
+
+# ==========================================
+# 1. THE CLOJURE DEBUG WRAPPER
+# ==========================================
+def ():
+    return """; ==========================================
+; CLOJURE STATE TRACKER (V1.0)
+; ==========================================
+(require '[clojure.pprint :as pp])
+
+(defn _ad_log_state [line-no var-name value]
+  (let [log-msg (str "[DEBUG] Line: " line-no " | " var-name " = " (pr-str value))]
+    (println log-msg)
+    (spit "_CLOJURE_DEBUG_LOG.txt" (str log-msg "\\n") :append true)))
+
+(defn _ad_log_error [line-no err]
+  (let [err-msg (str "[ERROR] Line: " line-no " | " (.getMessage err))]
+    (println err-msg)
+    (spit "_CLOJURE_DEBUG_LOG.txt" (str err-msg "\\n") :append true)))
+; ==========================================
+"""
+
+# ==========================================
+# 2. THE CLOJURE INJECTION ENGINE
+# ==========================================
+def inject_clojure(file_path):
+    try:
+        with open(file_path, 'r', encoding='utf-8') as f:
+            content = f.read()
+
+        # Find top-level Clojure forms (e.g., defn, def, or any balanced parens)
+        # This regex looks for (defn name ...) or (def name ...)
+        forms = re.split(r'\n(?=\()', content) 
+        
+        new_content = [generate_clj_header()]
+        
+        for i, form in enumerate(forms):
+            if not form.strip():
+                continue
+            
+            # Identify if it's a function definition to wrap it
+            if form.strip().startswith("(defn"):
+                # Extract function name for logging
+                match = re.search(r'defn\s+([^\s\[]+)', form)
+                func_name = match.group(1) if match else "unknown-fn"
+                
+                # Wrap the body of the function in a try/catch
+                # Note: This is a simplified transformation
+                wrapped_form = f"""
+(defn {func_name}-instrumented [& args]
+  (try
+    (let [res (apply (fn {form[form.find('['):]}) args)]
+      (_ad_log_state "N/A" "{func_name} result" res)
+      res)
+    (catch Exception e
+      (_ad_log_error "N/A" e)
+      (throw e))))
+"""
+                new_content.append(wrapped_form)
+            else:
+                new_content.append(form)
+
+        with open(file_path, 'w', encoding='utf-8') as f:
+            f.write("\n".join(new_content))
+        return True
+    except Exception as e:
+        print(f"Injection Error on {file_path}: {e}")
+        return False
+
+# ==========================================
+# 3. RUNNER
+# ==========================================
+def process_clojure_project(source_dir):
+    timestamp = int(time.time())
+    target_dir = source_dir.rstrip('\\/') + f"_CLJ_DEBUG_{timestamp}"
+    
+    if not os.path.exists(target_dir): 
+        os.makedirs(target_dir)
+        
+    print(f"\n[START] Building instrumented Clojure project...")
+    
+    for root, _, files in os.walk(source_dir):
+        # Ignore common build/tooling folders
+        if any(x in root for x in ['.git', '.lsp', '.calva', 'target', 'classes']): 
+            continue
+            
+        for file in files:
+            if file.endswith(".clj"):
+                src = os.path.join(root, file)
+                dst = os.path.join(target_dir, os.path.relpath(src, source_dir))
+                
+                os.makedirs(os.path.dirname(dst), exist_ok=True)
+                shutil.copy2(src, dst)
+                
+                inject_clojure(dst)
+                print(f"    Instrumented: {file}")
+                
+    print(f"\n[FINISH] Instrumented Clojure project ready at: {target_dir}")
+
+if __name__ == "__main__":
+    p = input("Clojure Project Path: ").strip().strip('"')
+    if os.path.isdir(p):
+        process_clojure_project(p)
+    else:
+        print("Invalid path.")
