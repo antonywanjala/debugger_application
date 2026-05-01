@@ -1,0 +1,176 @@
+import os
+import shutil
+import time
+
+# ==========================================
+# 1. THE Q# LOGGER HEADER
+# ==========================================
+def generate_qsharp_header():
+    return """
+# ==========================================
+# Q# QUANTUM DEBUGGER WRAPPER (V1.0)
+# ==========================================
+import datetime as _dt
+import sys
+import os
+import builtins 
+import csv
+try:
+    import qsharp
+except ImportError:
+    qsharp = None
+
+_AD_DEBUG_ACTIVE = True
+_ORIGINAL_PRINT = builtins.print 
+
+def _reset_logs():
+    log_files = ["_Q_DEBUG_ONLY.txt", "_Q_SCRIPT_ONLY.txt", "_QUANTUM_LOG.txt"]
+    for f_name in log_files:
+        try:
+            with open(f_name, "w", encoding="utf-8") as f:
+                f.write(f"--- QUANTUM SESSION START: {_dt.datetime.now()} ---\\n")
+        except: pass
+
+    try:
+        with open("_Q_VARIABLE_TRACKER.csv", "w", encoding="utf-8", newline='') as f:
+            writer = csv.writer(f)
+            writer.writerow(["Line", "Variable", "Value", "Is_Quantum_Result"])
+    except: pass
+
+if not hasattr(builtins, '_AD_LOGS_WIPED'):
+    _reset_logs()
+    builtins._AD_LOGS_WIPED = True
+
+def _record_q_state(line_no, local_vars):
+    if not _AD_DEBUG_ACTIVE: return
+    try:
+        with open("_Q_VARIABLE_TRACKER.csv", "a", encoding="utf-8", newline='') as f:
+            writer = csv.writer(f)
+            for var_name, var_val in local_vars.items():
+                if var_name.startswith('_') or var_name == 'qsharp': continue
+                is_q = "Yes" if "Result" in str(type(var_val)) or "Qubit" in str(var_val) else "No"
+                clean_val = str(var_val).replace('\\n', ' ').replace('\\r', '')
+                writer.writerow([line_no, var_name, clean_val, is_q])
+    except: pass
+
+def _ad_q_output(msg, is_error=True):
+    if not _AD_DEBUG_ACTIVE: return
+    timestamp = _dt.datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+    tag = "[Q_ERROR]" if is_error else "[Q_SCRIPT]"
+    formatted = f"{tag} [{timestamp}] {msg}"
+    _ORIGINAL_PRINT(formatted)
+    
+    target = ["_Q_DEBUG_ONLY.txt", "_QUANTUM_LOG.txt"] if is_error else ["_Q_SCRIPT_ONLY.txt", "_QUANTUM_LOG.txt"]
+    for f_name in target:
+        try:
+            with open(f_name, "a", encoding="utf-8") as f: f.write(formatted + "\\n")
+        except: pass
+
+def print(*args, **kwargs):
+    output = " ".join(map(str, args))
+    _ad_q_output(output, is_error=False)
+
+builtins.print = print
+# ==========================================
+"""
+
+# ==========================================
+# 2. THE PRE-PROCESSOR (Simplified for Q# Host)
+# ==========================================
+def clean_source(source):
+    result, i, n = [], 0, len(source)
+    quote_type, in_comment = None, False
+    while i < n:
+        char = source[i]
+        if in_comment:
+            if char == '\n': in_comment = False; result.append('\n')
+            i += 1; continue
+        if quote_type:
+            if char == quote_type: quote_type = None
+            result.append(char); i += 1; continue
+        if char in ('"', "'"): quote_type = char; result.append(char); i += 1
+        elif char == '#': in_comment = True; i += 1
+        else: result.append(char); i += 1
+    return "".join(result)
+
+# ==========================================
+# 3. THE INJECTION ENGINE (Q# Specific)
+# ==========================================
+def inject_qsharp_debug(file_path, max_depth=3):
+    try:
+        with open(file_path, 'r', encoding='utf-8') as f:
+            raw_content = f.read()
+
+        clean_content = clean_source(raw_content)
+        lines = clean_content.splitlines()
+        new_content = [generate_qsharp_header()]
+        
+        for i, line in enumerate(lines):
+            stripped = line.strip()
+            if not stripped or stripped.startswith(('import', 'from', 'def', 'class', '@')):
+                new_content.append(line)
+                continue
+
+            indent_len = len(line) - len(line.lstrip())
+            indent_str = line[:indent_len]
+
+            # We focus on lines that likely execute Q# operations or handle results
+            is_quantum_call = ".simulate()" in stripped or ".run()" in stripped or "qsharp." in stripped
+
+            if (indent_len // 4) <= max_depth:
+                new_content.append(f"{indent_str}try:")
+                new_content.append(f"{indent_str}    {stripped}")
+                # After execution, record the state (especially quantum results)
+                new_content.append(f"{indent_str}    _record_q_state({i + 1}, locals())")
+                if is_quantum_call:
+                    new_content.append(f"{indent_str}    _ad_q_output('Quantum Op executed at line {i+1}', False)")
+                
+                new_content.append(f"{indent_str}except Exception as e:")
+                new_content.append(f"{indent_str}    _ad_q_output(f'Line {i + 1} Failed: {{e}}', is_error=True)")
+                new_content.append(f"{indent_str}    raise")
+            else:
+                new_content.append(line)
+
+        with open(file_path, 'w', encoding='utf-8') as f:
+            f.write("\n".join(new_content))
+        return True
+    except Exception as e:
+        print(f"Injection Error: {e}")
+        return False
+
+# ==========================================
+# 4. RUNNER
+# ==========================================
+def process_q_project(source_dir, max_depth):
+    target_dir = source_dir.rstrip('\\/') + f"_QDEBUG_{int(time.time())}"
+    if not os.path.exists(target_dir): os.makedirs(target_dir)
+    
+    print(f"\n[START] Instrumenting Q# Host Project...")
+    for root, _, files in os.walk(source_dir):
+        if any(x in root for x in ['venv', '.git', '__pycache__']): continue
+        for file in files:
+            src = os.path.join(root, file)
+            dst = os.path.join(target_dir, os.path.relpath(src, source_dir))
+            os.makedirs(os.path.dirname(dst), exist_ok=True)
+            
+            if file.endswith(".py"):
+                shutil.copy2(src, dst)
+                inject_qsharp_debug(dst, max_depth)
+                print(f"    Instrumented Host: {file}")
+            else:
+                # Copy .qs files and others without modification
+                shutil.copy2(src, dst)
+                
+    print(f"\n[FINISH] Instrumented project created at: {target_dir}")
+    print("Run your Python host script from that folder to see quantum logs.")
+
+if __name__ == "__main__":
+    p = input("Q# Project Path: ").strip().strip('"')
+    try:
+        d = int(input("Max Depth (default 2): ").strip() or 2)
+    except:
+        d = 2
+    if os.path.isdir(p):
+        process_q_project(p, d)
+    else:
+        print("Invalid path.")
