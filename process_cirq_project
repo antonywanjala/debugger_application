@@ -1,0 +1,212 @@
+import os
+import shutil
+import time
+import builtins
+import csv
+import datetime as _dt
+
+# ==========================================
+# 1. THE LOGGER HEADER (Optimized for Cirq)
+# ==========================================
+def generate_header():
+    return """
+# ==========================================
+# CIRQ DEBUG WRAPPER + STATE TRACKER (V6.4)
+# ==========================================
+import datetime as _dt
+import sys
+import os
+import builtins 
+import csv
+import cirq  # Ensure cirq is accessible for type checking if needed
+
+_AD_DEBUG_ACTIVE = True
+_ORIGINAL_PRINT = builtins.print 
+
+def _reset_logs():
+    log_files = ["_DEBUG_ONLY.txt", "_SCRIPT_ONLY.txt", "_COMBINED_LOG.txt"]
+    for f_name in log_files:
+        try:
+            with open(f_name, "w", encoding="utf-8") as f:
+                f.write(f"--- CIRQ DEBUG SESSION START: {_dt.datetime.now()} ---\\n")
+        except: pass
+
+    try:
+        with open("_VARIABLE_TRACKER.csv", "w", encoding="utf-8", newline='') as f:
+            writer = csv.writer(f)
+            writer.writerow(["Line", "Variable", "Value", "Type"])
+    except: pass
+
+if not hasattr(builtins, '_AD_LOGS_WIPED'):
+    _reset_logs()
+    builtins._AD_LOGS_WIPED = True
+
+def _record_state(line_no, local_vars):
+    if not _AD_DEBUG_ACTIVE: return
+    try:
+        with open("_VARIABLE_TRACKER.csv", "a", encoding="utf-8", newline='') as f:
+            writer = csv.writer(f)
+            for var_name, var_val in local_vars.items():
+                if var_name.startswith('_') or var_name == 'cirq': continue
+                
+                # Format Cirq objects (Circuits/Gates) for CSV readability
+                clean_val = str(var_val).replace('\\n', ' | ').replace('\\r', '')
+                val_type = type(var_val).__name__
+                writer.writerow([line_no, var_name, clean_val, val_type])
+    except: pass
+
+def _ad_script_output(msg, is_error=True):
+    if not _AD_DEBUG_ACTIVE: return
+    timestamp = _dt.datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+    formatted = f"[CIRQ_DEBUG_ERROR] [{timestamp}] {msg}" if is_error else f"[SCRIPT] {msg}"
+    _ORIGINAL_PRINT(formatted)
+    
+    target = ["_DEBUG_ONLY.txt", "_COMBINED_LOG.txt"] if is_error else ["_SCRIPT_ONLY.txt", "_COMBINED_LOG.txt"]
+    for f_name in target:
+        try:
+            with open(f_name, "a", encoding="utf-8") as f: f.write(formatted + "\\n")
+        except: pass
+
+def print(*args, **kwargs):
+    output = " ".join(map(str, args))
+    _ad_script_output(output, is_error=False)
+
+builtins.print = print
+# ==========================================
+"""
+
+# ==========================================
+# 2. SOURCE PRE-PROCESSOR
+# ==========================================
+def clean_source(source):
+    result, i, n = [], 0, len(source)
+    quote_type, in_comment, last_valuable_char, preserve_triple = None, False, "", False
+    while i < n:
+        char = source[i]
+        if in_comment:
+            if char == '\n': in_comment = False; result.append('\n')
+            i += 1; continue
+        if quote_type:
+            if quote_type in ('"""', "'''"):
+                if source[i:i + 3] == quote_type:
+                    if preserve_triple: result.append(quote_type)
+                    quote_type = None; i += 3; continue
+                else:
+                    if preserve_triple: result.append(char)
+                    i += 1
+            else:
+                if char == quote_type and (i == 0 or source[i - 1] != '\\'):
+                    result.append(char); quote_type = None
+                else:
+                    result.append(char)
+                i += 1
+            continue
+        if source[i:i + 3] in ('"""', "'''"):
+            quote_type = source[i:i + 3]
+            preserve_triple = (last_valuable_char == '=')
+            if preserve_triple: result.append(quote_type)
+            i += 3
+        elif char in ('"', "'"):
+            quote_type = char; result.append(char); i += 1
+        elif char == '#':
+            in_comment = True; i += 1
+        else:
+            if not char.isspace(): last_valuable_char = char
+            result.append(char); i += 1
+    return "".join(result)
+
+# ==========================================
+# 3. CIRQ-SPECIFIC INJECTION ENGINE
+# ==========================================
+def inject_into_file(file_path, max_depth=3):
+    try:
+        with open(file_path, 'r', encoding='utf-8') as f:
+            raw_content = f.read()
+
+        clean_content = clean_source(raw_content)
+        lines = clean_content.splitlines()
+        new_content = [generate_header()]
+        bracket_level, in_triple_quote = 0, False
+
+        for i, line in enumerate(lines):
+            stripped = line.strip()
+            if not stripped or stripped.startswith("import") or stripped.startswith("from"):
+                new_content.append(line)
+                continue
+
+            triple_count = line.count('"""') + line.count("'''")
+            starts_or_ends_triple = triple_count % 2 != 0
+            indent_len = len(line) - len(line.lstrip())
+            indent_str = line[:indent_len]
+
+            prev_level = bracket_level
+            bracket_level += (line.count('(') + line.count('[') + line.count('{'))
+            bracket_level -= (line.count(')') + line.count(']') + line.count('}'))
+
+            structural_keywords = ('def ', 'class ', 'if ', 'elif ', 'else:', 'for ', 'while ',
+                                   'with ', 'try:', 'except', 'finally:', '@')
+            is_structural = any(stripped.startswith(k) for k in structural_keywords) or stripped.endswith(':')
+
+            # Logic to inject try-except and state recording
+            if (not in_triple_quote and prev_level == 0 and bracket_level == 0 and
+                    not is_structural and (indent_len // 4) <= max_depth):
+
+                if stripped in (")", "]", "}", "),", "],", "},") or starts_or_ends_triple:
+                    new_content.append(line)
+                else:
+                    new_content.append(f"{indent_str}try:")
+                    new_content.append(f"{indent_str}    {stripped}")
+                    new_content.append(f"{indent_str}    _record_state({i + 1}, locals())")
+                    new_content.append(f"{indent_str}except Exception as e:")
+                    new_content.append(f"{indent_str}    _ad_script_output(f'Cirq Step at Line {i + 1} Failed: {{e}}', is_error=True)")
+                    new_content.append(f"{indent_str}    raise")
+            else:
+                new_content.append(line)
+
+            if starts_or_ends_triple: in_triple_quote = not in_triple_quote
+
+        with open(file_path, 'w', encoding='utf-8') as f:
+            f.write("\n".join(new_content))
+        return True
+    except Exception as e:
+        print(f"Injection Error: {e}")
+        return False
+
+# ==========================================
+# 4. RUNNER
+# ==========================================
+def process_cirq_project(source_dir, max_depth):
+    timestamp = int(time.time())
+    target_dir = source_dir.rstrip('\\/') + f"_CIRQ_DEBUG_{timestamp}"
+    
+    if not os.path.exists(target_dir):
+        os.makedirs(target_dir)
+        
+    print(f"\n[START] Building instrumented Cirq project...")
+    
+    for root, _, files in os.walk(source_dir):
+        if any(x in root for x in ['venv', '.git', '__pycache__', '_CIRQ_DEBUG_']):
+            continue
+        for file in files:
+            if file.endswith(".py"):
+                src = os.path.join(root, file)
+                dst = os.path.join(target_dir, os.path.relpath(src, source_dir))
+                os.makedirs(os.path.dirname(dst), exist_ok=True)
+                shutil.copy2(src, dst)
+                inject_into_file(dst, max_depth)
+                print(f"    Instrumented: {file}")
+                
+    print(f"\n[FINISH] Instrumented project ready at: {target_dir}")
+    print(f"Check '_VARIABLE_TRACKER.csv' after running your script to see Circuit states.")
+
+if __name__ == "__main__":
+    path = input("Enter Cirq Project Folder Path: ").strip().strip('"')
+    try:
+        depth = int(input("Injection Depth (default 3): ").strip() or 3)
+    except:
+        depth = 3
+        
+    if os.path.isdir(path):
+        process_cirq_project(path, depth)
+    else:
+        print("Error: Invalid directory path.")
