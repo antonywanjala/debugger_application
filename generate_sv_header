@@ -1,0 +1,107 @@
+import os
+import shutil
+import time
+import re
+
+# ==========================================
+# 1. THE SYSTEMVERILOG HEADER (Logging Logic)
+# ==========================================
+def generate_sv_header():
+    return """
+// ==========================================
+// AUTO-GENERATED DEBUG LAYER (SV-V1.0)
+// ==========================================
+`ifndef SV_DEBUG_DEFS
+`define SV_DEBUG_DEFS
+module debug_logger;
+    int log_file;
+    int csv_file;
+
+    initial begin
+        log_file = $fopen("_SIM_LOG.txt", "w");
+        csv_file = $fopen("_VAR_TRACKER.csv", "w");
+        $fdisplay(csv_file, "Time, Signal, Value");
+    end
+
+    // Helper task to log signals
+    task log_signal(string name, logic [511:0] val);
+        $fdisplay(log_file, "[%0t] %s changed to %h", $time, name, val);
+        $fdisplay(csv_file, "%0t, %s, %h", $time, name, val);
+    endtask
+endmodule
+`endif
+// ==========================================
+"""
+
+# ==========================================
+# 2. THE SV INSTRUMENTATION ENGINE
+# ==========================================
+def instrument_sv_file(file_path):
+    try:
+        with open(file_path, 'r', encoding='utf-8') as f:
+            lines = f.readlines()
+
+        new_content = []
+        # Basic regex to find variable assignments (non-blocking and blocking)
+        # Matches: signal <= value; or signal = value;
+        assign_pattern = re.compile(r'(\w+)\s*(<=|=)\s*([^;]+);')
+
+        for i, line in enumerate(lines):
+            stripped = line.strip()
+            new_content.append(line)
+
+            # Skip comments and empty lines
+            if not stripped or stripped.startswith("//") or stripped.startswith("/*"):
+                continue
+
+            # Inject tracking after assignments
+            match = assign_pattern.search(stripped)
+            if match:
+                var_name = match.group(1)
+                # Avoid tracking loop indices or common clock/reset names if desired
+                if var_name not in ['clk', 'rst', 'rst_n', 'i']:
+                    indent = line[:line.find(match.group(1))]
+                    # SystemVerilog 'strobe' captures values at the end of the time step
+                    new_content.append(f'{indent}$strobe("[DEBUG] Line {i+1}: {var_name} = %h", {var_name});\n')
+
+        with open(file_path, 'w', encoding='utf-8') as f:
+            f.writelines(new_content)
+        return True
+    except Exception as e:
+        print(f"Error instrumenting {file_path}: {e}")
+        return False
+
+# ==========================================
+# 3. PROJECT RUNNER
+# ==========================================
+def process_sv_project(source_dir):
+    # Create unique debug directory
+    timestamp = int(time.time())
+    target_dir = f"{source_dir.rstrip('/\\\\')}_SV_DEBUG_{timestamp}"
+    
+    if not os.path.exists(target_dir):
+        os.makedirs(target_dir)
+
+    print(f"\n[START] Instrumenting SystemVerilog Project...")
+    
+    for root, _, files in os.walk(source_dir):
+        for file in files:
+            if file.endswith((".sv", ".v")):
+                src = os.path.join(root, file)
+                dst = os.path.join(target_dir, os.path.relpath(src, source_dir))
+                
+                os.makedirs(os.path.dirname(dst), exist_ok=True)
+                shutil.copy2(src, dst)
+                
+                if instrument_sv_file(dst):
+                    print(f"    Instrumented: {file}")
+
+    print(f"\n[FINISH] Instrumented project ready at: {target_dir}")
+    print("Note: Run your simulation (Modelsim/Vivado) on these new files to see logs.")
+
+if __name__ == "__main__":
+    path = input("Enter SystemVerilog Project Path: ").strip().strip('"')
+    if os.path.isdir(path):
+        process_sv_project(path)
+    else:
+        print("Invalid directory path.")
