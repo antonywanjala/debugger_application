@@ -3,22 +3,23 @@ import shutil
 import time
 
 
-# ==========================================
-# 1. THE LOGGER HEADER (V6.4 - Re-Raise Fix)
-# ==========================================
 def generate_header():
-    return """
+    # Added Universal IDE Modelines to force the editor engine to lock to spaces.
+    # The injected header strictly uses 4-space blocks for its internal hierarchy.
+    return """# -*- coding: utf-8 -*-
+# vim: expandtab tabstop=4 shiftwidth=4
+# -*- indent-tabs-mode: nil; tab-width: 4 -*-
 # ==========================================
-# STRICT RECURSIVE WRAPPER + STATE TRACKER (V6.4)
+# STRICT RECURSIVE WRAPPER + STATE TRACKER (V7.4 - PURE SPACES)
 # ==========================================
 import datetime as _dt
 import sys
 import os
-import builtins 
+import builtins
 import csv
 
 _AD_DEBUG_ACTIVE = True
-_ORIGINAL_PRINT = builtins.print 
+_ORIGINAL_PRINT = builtins.print
 
 def _reset_logs():
     log_files = ["_DEBUG_ONLY.txt", "_SCRIPT_ONLY.txt", "_COMBINED_LOG.txt"]
@@ -26,13 +27,15 @@ def _reset_logs():
         try:
             with open(f_name, "w", encoding="utf-8") as f:
                 f.write(f"--- SESSION START: {_dt.datetime.now()} ---\\n")
-        except: pass
+        except:
+            pass
 
     try:
         with open("_VARIABLE_TRACKER.csv", "w", encoding="utf-8", newline='') as f:
             writer = csv.writer(f)
             writer.writerow(["Line", "Variable", "Value"])
-    except: pass
+    except:
+        pass
 
 if not hasattr(builtins, '_AD_LOGS_WIPED'):
     _reset_logs()
@@ -47,149 +50,154 @@ def _record_state(line_no, local_vars):
                 if var_name.startswith('_'): continue
                 clean_val = str(var_val).replace('\\n', ' ').replace('\\r', '')
                 writer.writerow([line_no, var_name, clean_val])
-    except: pass
+    except:
+        pass
 
 def _ad_script_output(msg, is_error=True):
-    \"\"\"Restores the SCRIPT and DEBUG_ERROR tags for console/file parity.\"\"\"
     if not _AD_DEBUG_ACTIVE: return
     timestamp = _dt.datetime.now().strftime("%Y-%m-%d %H:%M:%S")
-
     formatted = f"[DEBUG_ERROR] [{timestamp}] {msg}" if is_error else f"[SCRIPT] {msg}"
-
     _ORIGINAL_PRINT(formatted)
-
     target = ["_DEBUG_ONLY.txt", "_COMBINED_LOG.txt"] if is_error else ["_SCRIPT_ONLY.txt", "_COMBINED_LOG.txt"]
     for f_name in target:
         try:
-            with open(f_name, "a", encoding="utf-8") as f: f.write(formatted + "\\n")
-        except: pass
+            with open(f_name, "a", encoding="utf-8") as f: 
+                f.write(formatted + "\\n")
+        except:
+            pass
 
 def print(*args, **kwargs):
     output = " ".join(map(str, args))
     _ad_script_output(output, is_error=False)
 
 builtins.print = print
-# ==========================================
-"""
+# ==========================================\n"""
 
 
-# ==========================================
-# 2. THE PRE-PROCESSOR
-# ==========================================
-def clean_source(source):
-    result, i, n = [], 0, len(source)
-    quote_type, in_comment, last_valuable_char, preserve_triple = None, False, "", False
-    while i < n:
-        char = source[i]
-        if in_comment:
-            if char == '\n': in_comment = False; result.append('\n')
-            i += 1;
-            continue
-        if quote_type:
-            if quote_type in ('"""', "'''"):
-                if source[i:i + 3] == quote_type:
-                    if preserve_triple: result.append(quote_type)
-                    quote_type = None;
-                    i += 3;
-                    continue
-                else:
-                    if preserve_triple: result.append(char)
-                    i += 1
-            else:
-                if char == quote_type and (i == 0 or source[i - 1] != '\\'):
-                    result.append(char);
-                    quote_type = None
-                else:
-                    result.append(char)
-                i += 1
-            continue
-        if source[i:i + 3] in ('"""', "'''"):
-            quote_type = source[i:i + 3]
-            preserve_triple = (last_valuable_char == '=')
-            if preserve_triple: result.append(quote_type)
-            i += 3
-        elif char in ('"', "'"):
-            quote_type = char;
-            result.append(char);
-            i += 1
-        elif char == '#':
-            in_comment = True;
-            i += 1
-        else:
-            if not char.isspace(): last_valuable_char = char
-            result.append(char);
-            i += 1
-    return "".join(result)
-
-
-# ==========================================
-# 3. THE INJECTION ENGINE (WITH RAISE FIX)
-# ==========================================
 def inject_into_file(file_path, max_depth=3):
     try:
         with open(file_path, 'r', encoding='utf-8') as f:
             raw_content = f.read()
 
-        clean_content = clean_source(raw_content)
-        lines = clean_content.splitlines()
-        new_content = [generate_header()]
-        bracket_level, in_triple_quote = 0, False
+        # Phase 1: Eradicate hidden non-breaking space variants globally
+        raw_content = raw_content.replace('\xa0', ' ').replace('\u00a0', ' ')
+        raw_lines = raw_content.splitlines()
 
-        for i, line in enumerate(lines):
+        lines_meta = []
+        in_triple_quote = False
+        quote_char = None
+
+        # Build structural state machine mask across lines
+        for line in raw_lines:
             stripped = line.strip()
-            if not stripped:
-                new_content.append(line);
+            line_starts_in_literal = in_triple_quote
+
+            i = 0
+            while i < len(line):
+                if in_triple_quote:
+                    if line[i:i + 3] == quote_char:
+                        in_triple_quote = False
+                        quote_char = None
+                        i += 3
+                        continue
+                    i += 1
+                else:
+                    if line[i:i + 3] in ('"""', "'''"):
+                        in_triple_quote = True
+                        quote_char = line[i:i + 3]
+                        i += 3
+                        continue
+                    elif line[i] in ('"', "'"):
+                        s_char = line[i]
+                        i += 1
+                        while i < len(line) and line[i] != s_char:
+                            if line[i] == '\\':
+                                i += 2
+                            else:
+                                i += 1
+                        i += 1
+                        continue
+                    i += 1
+
+            line_ends_in_literal = in_triple_quote
+            is_literal = (line_starts_in_literal or line_ends_in_literal or
+                          stripped.startswith(('"""', "'''")) or stripped.endswith(('"""', "'''")))
+            lines_meta.append((line, is_literal))
+
+        total_lines = len(lines_meta)
+        transformed_lines = [None] * total_lines
+        bracket_level = 0
+        structural_keywords = ('def ', 'class ', 'if ', 'elif ', 'else:', 'for ', 'while ',
+                               'with ', 'try:', 'except', 'finally:', '@', 'import ', 'from ')
+
+        for idx in range(total_lines):
+            line_text, trapped_in_literal = lines_meta[idx]
+
+            # Extract JUST the intra-line expression, leaving all internal/trailing spaces completely intact
+            content_part = line_text.lstrip(' \t')
+            stripped_for_check = content_part.strip()
+
+            # UNIVERSAL SPACE CONVERSION (Applied to EVERYTHING to satisfy IDE heuristics)
+            raw_indent = line_text[:len(line_text) - len(content_part)]
+            total_space_weight = raw_indent.count(' ') + (raw_indent.count('\t') * 4)
+            indent_level = max(0, total_space_weight // 4)
+
+            # Construct the new, strictly space-instantiated preceding spacing (4 spaces per level)
+            indent_str = '    ' * indent_level
+
+            # Reattach the pure-space prefix to the fully preserved invocation
+            normalized_line = indent_str + content_part
+
+            # Leave empty lines and internal string literal blocks untouched structurally (but formatted with spaces)
+            if not stripped_for_check:
+                transformed_lines[idx] = indent_str  # Preserve empty lines as pure spaces or completely empty
                 continue
 
-            triple_count = line.count('"""') + line.count("'''")
-            starts_or_ends_triple = triple_count % 2 != 0
-            indent_len = len(line) - len(line.lstrip())
-            indent_str = line[:indent_len]
+            if trapped_in_literal:
+                transformed_lines[idx] = normalized_line
+                continue
 
-            prev_level = bracket_level
-            bracket_level += (line.count('(') + line.count('[') + line.count('{'))
-            bracket_level -= (line.count(')') + line.count(']') + line.count('}'))
+            prev_bracket_level = bracket_level
+            bracket_level += (line_text.count('(') + line_text.count('[') + line_text.count('{'))
+            bracket_level -= (line_text.count(')') + line_text.count(']') + line_text.count('}'))
 
-            structural_keywords = ('def ', 'class ', 'if ', 'elif ', 'else:', 'for ', 'while ',
-                                   'with ', 'try:', 'except', 'finally:', '@', 'import ', 'from ')
-            is_structural = any(stripped.startswith(k) for k in structural_keywords) or stripped.endswith(':')
+            is_structural = any(
+                stripped_for_check.startswith(k) for k in structural_keywords) or stripped_for_check.endswith(':')
 
-            if (not in_triple_quote and prev_level == 0 and bracket_level == 0 and
-                    not is_structural and (indent_len // 4) <= max_depth):
-
-                if stripped in (")", "]", "}", "),", "],", "},") or starts_or_ends_triple:
-                    new_content.append(line)
+            # Phase 3: Injection (Using strict 4-space string increments for the block hierarchy)
+            if prev_bracket_level == 0 and bracket_level == 0 and not is_structural and indent_level <= max_depth:
+                if stripped_for_check in (")", "]", "}", "),", "],", "},"):
+                    transformed_lines[idx] = normalized_line
                 else:
-                    new_content.append(f"{indent_str}try:")
-                    new_content.append(f"{indent_str}    {stripped}")
-                    new_content.append(f"{indent_str}    _record_state({i + 1}, locals())")
-                    new_content.append(f"{indent_str}except Exception as e:")
-                    new_content.append(
-                        f"{indent_str}    _ad_script_output(f'Line {i + 1} Failed: {{e}}', is_error=True)")
-                    # THE CRITICAL FIX: Re-raise the exception to the outer, original scope
-                    new_content.append(f"{indent_str}    raise")
+                    block = [
+                        f"{indent_str}try:",
+                        f"{indent_str}    {content_part}",
+                        f"{indent_str}    _record_state({idx + 1}, locals())",
+                        f"{indent_str}except Exception as e:",
+                        f"{indent_str}    _ad_script_output(f'Line {idx + 1} Failed: {{e}}', is_error=True)",
+                        f"{indent_str}    raise"
+                    ]
+                    transformed_lines[idx] = "\n".join(block)
             else:
-                new_content.append(line)
+                transformed_lines[idx] = normalized_line
 
-            if starts_or_ends_triple: in_triple_quote = not in_triple_quote
-
+        new_content = [generate_header()] + transformed_lines
         with open(file_path, 'w', encoding='utf-8') as f:
-            f.write("\n".join(new_content))
+            f.write("\n".join(new_content) + "\n")
         return True
     except Exception as e:
-        print(f"Injection Error: {e}");
+        print(f"Injection Error: {e}")
         return False
 
 
-# ==========================================
-# 4. RUNNER
-# ==========================================
 def process_project(source_dir, max_depth):
     target_dir = source_dir.rstrip('\\/') + f"_DEBUG_STATE_{int(time.time())}"
-    if not os.path.exists(target_dir): os.makedirs(target_dir)
-    print(f"\n[START] Building instrumented project...")
+    if not os.path.exists(target_dir):
+        os.makedirs(target_dir)
+    print(f"\n[START] Building instrumented project layout...")
     for root, _, files in os.walk(source_dir):
-        if any(x in root for x in ['venv', '.git', '__pycache__']): continue
+        if any(x in root for x in ['venv', '.git', '__pycache__']):
+            continue
         for file in files:
             if file.endswith(".py"):
                 src = os.path.join(root, file)
@@ -198,7 +206,7 @@ def process_project(source_dir, max_depth):
                 shutil.copy2(src, dst)
                 inject_into_file(dst, max_depth)
                 print(f"    Instrumented: {file}")
-    print(f"\n[FINISH] Project ready at: {target_dir}")
+    print(f"\n[FINISH] Safe project sandbox initialized at: {target_dir}")
 
 
 if __name__ == "__main__":
@@ -210,4 +218,4 @@ if __name__ == "__main__":
     if os.path.isdir(p):
         process_project(p, d)
     else:
-        print("Invalid path.")
+        print("Invalid directory path.")
