@@ -1,0 +1,106 @@
+import os
+import shutil
+import time
+
+def inject_into_zig_file(file_path, max_depth=3):
+    try:
+        with open(file_path, 'r', encoding='utf-8') as f:
+            raw_lines = f.readlines()
+
+        transformed_lines = []
+        bracket_level = 0
+        
+        # Zig-specific structural keywords where we SHOULD NOT inject our trace
+        structural_keywords = (
+            'fn ', 'const ', 'var ', 'pub ', 'struct ', 'enum ', 'union ', 
+            'if ', 'else', 'while ', 'for ', 'switch ', 'defer ', 'errdefer ',
+            'return ', 'break', 'continue', 'catch ', 'try '
+        )
+
+        needs_std_import = True
+        for line in raw_lines:
+            if 'const std = @import("std");' in line:
+                needs_std_import = False
+
+        for idx, line in enumerate(raw_lines):
+            stripped = line.strip()
+            
+            # Preserve empty lines, comments, and single-character block markers
+            if not stripped or stripped.startswith('//') or stripped in ('{', '}'):
+                transformed_lines.append(line)
+                continue
+
+            # Track bracket depth to ensure we only inject inside functions/blocks
+            prev_bracket_level = bracket_level
+            bracket_level += line.count('{') - line.count('}')
+
+            is_structural = any(stripped.startswith(k) for k in structural_keywords)
+            
+            # Only inject if we are inside a block, it's not a structural definition, 
+            # and we aren't exceeding the max depth
+            if prev_bracket_level > 0 and bracket_level > 0 and not is_structural and bracket_level <= max_depth:
+                # Extract the indentation
+                indent_str = line[:len(line) - len(line.lstrip(' \t'))]
+                
+                # Inject Zig's @src() for zero-overhead, compile-time line/function tracking
+                trace_call = f'{indent_str}std.debug.print("[TRACE] {{s}}() at line {{d}}\\n", .{{@src().fn_name, @src().line}});\n'
+                transformed_lines.append(trace_call)
+            
+            # Append the original line
+            transformed_lines.append(line)
+
+        content = "".join(transformed_lines)
+        
+        # Ensure std is available if we injected std.debug.print
+        if 'std.debug.print' in content and needs_std_import:
+            content = 'const std = @import("std");\n' + content
+
+        with open(file_path, 'w', encoding='utf-8') as f:
+            f.write(content)
+            
+        return True
+    except Exception as e:
+        print(f"Injection Error on {file_path}: {e}")
+        return False
+
+def process_project(source_dir, max_depth):
+    target_dir = source_dir.rstrip('\\/') + f"_ZIG_DEBUG_STATE_{int(time.time())}"
+    if not os.path.exists(target_dir):
+        os.makedirs(target_dir)
+        
+    print(f"\n[START] Building instrumented project layout...")
+    
+    for root, _, files in os.walk(source_dir):
+        if any(x in root for x in ['zig-cache', 'zig-out', '.git']):
+            continue
+            
+        for file in files:
+            if file.endswith(".zig"):
+                src = os.path.join(root, file)
+                dst = os.path.join(target_dir, os.path.relpath(src, source_dir))
+                os.makedirs(os.path.dirname(dst), exist_ok=True)
+                
+                shutil.copy2(src, dst)
+                inject_into_zig_file(dst, max_depth)
+                print(f"    Instrumented: {file}")
+            # Copy build scripts and other necessary files untouched
+            elif file in ["build.zig", "build.zig.zon"]:
+                src = os.path.join(root, file)
+                dst = os.path.join(target_dir, os.path.relpath(src, source_dir))
+                os.makedirs(os.path.dirname(dst), exist_ok=True)
+                shutil.copy2(src, dst)
+                
+    print(f"\n[FINISH] Safe project sandbox initialized at: {target_dir}")
+    print("Run `zig build run` or `zig test` in the new directory to see your execution trace.")
+
+if __name__ == "__main__":
+    p = input("Zig Project Path: ").strip().strip('"')
+    try:
+        d = int(input("Max Block Depth (default 3): ").strip() or 3)
+    except:
+        d = 3
+        
+    if os.path.isdir(p):
+        process_project(p, d)
+    else:
+        print("Invalid directory path.")
