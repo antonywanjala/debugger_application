@@ -1,0 +1,169 @@
+import os
+import shutil
+import time
+
+def generate_prolog_header():
+    """
+    Generates helper predicates to handle logging and variable state tracking 
+    directly within the Prolog runtime execution.
+    """
+    return """% =================================================================
+% STRICT PROLOG RUNTIME STATE TRACKER & FAULT LOGGER
+% =================================================================
+:- dynamic _ad_log_initialized/0.
+
+_ad_init_logs :-
+    _ad_log_initialized, !.
+_ad_init_logs :-
+    catch(open('_DEBUG_ONLY.txt', write, S1), _, true), catch(close(S1), _, true),
+    catch(open('_SCRIPT_ONLY.txt', write, S2), _, true), catch(close(S2), _, true),
+    catch(open('_COMBINED_LOG.txt', write, S3), _, true), catch(close(S3), _, true),
+    catch(open('_VARIABLE_TRACKER.csv', write, S4), _, true),
+    catch((format(S4, "Predicate,Variable,Value~n", []), close(S4)), _, true),
+    assertz(_ad_log_initialized).
+
+_ad_record_state(Pred, VarName, VarVal) :-
+    _ad_init_logs,
+    catch((
+        open('_VARIABLE_TRACKER.csv', append, Stream),
+        format(Stream, "~w,~w,\\"~w\\"~n", [Pred, VarName, VarVal]),
+        close(Stream)
+    ), _, true).
+
+_ad_log_msg(Type, Pred, Msg) :-
+    _ad_init_logs,
+    get_time(TimeStamp),
+    stamp_date_time(TimeStamp, DateTime, local),
+    format_time(string(TS), "%Y-%m-%d %H:%M:%S", DateTime),
+    (Type == error -> 
+        (Formatted = f("[DEBUG_ERROR] [~s] Predicate ~w Failed: ~w", [TS, Pred, Msg]), Targets = ['_DEBUG_ONLY.txt', '_COMBINED_LOG.txt'])
+        ; 
+        (Formatted = f("[SCRIPT] [~s] Predicate ~w: ~w", [TS, Pred, Msg]), Targets = ['_SCRIPT_ONLY.txt', '_COMBINED_LOG.txt'])
+    ),
+    format("~w~n", [Formatted]),
+    forall(member(File, Targets), catch((
+        open(File, append, Stream),
+        format(Stream, "~w~n", [Formatted]),
+        close(Stream)
+    ), _, true)).
+
+% Helper to instrument variable extraction safely
+_ad_trace_var(Pred, VarName, Var) :-
+    (nonvar(Var) -> _ad_record_state(Pred, VarName, Var) ; _ad_record_state(Pred, VarName, '<unbound>')).
+% =================================================================
+
+"""
+
+def extract_prolog_variables(clause_text):
+    """
+    Scans a basic Prolog clause string to find discrete Prolog variable tokens 
+    (words starting with an uppercase letter or an underscore).
+    """
+    import re
+    # Match standard Prolog variables, excluding standalone underscores and cut operators
+    vars_found = set(re.findall(r'\b[A-Z_][a-zA-Z0-9_]*\b', clause_text))
+    return [v for v in vars_found if v != '_']
+
+def instrument_prolog_clause(clause, idx):
+    """
+    Parses a single Prolog rule or fact string and wraps it with telemetry wrappers.
+    """
+    stripped = clause.strip()
+    if not stripped or stripped.startswith('%') or stripped.startswith(':-'):
+        return clause
+
+    # Find the rule neck operator
+    if ':-' in stripped:
+        head, body = stripped.split(':-', 1)
+        head = head.strip()
+        body = body.rstrip('.').strip()
+        
+        # Determine predicate indicator for tracking metrics
+        pred_name = head.split('(')[0].strip() if '(' in head else head
+        variables = extract_prolog_variables(stripped)
+        
+        # Build variable tracking structures
+        var_trackers = []
+        for var in variables:
+            var_trackers.append(f"_ad_trace_var('{pred_name}', '{var}', {var})")
+        
+        tracker_goals = ", ".join(var_trackers) if var_trackers else "true"
+        
+        # Construct the runtime wrapper block
+        # Wraps the original sub-goals in a safe catch mechanism to spy on failure cascades
+        instrumented_body = (
+            f"(\n"
+            f"        _ad_init_logs,\n"
+            f"        catch(({body}), Error, (_ad_log_msg(error, '{pred_name}', Error), throw(Error)))\n"
+            f"    ->  ({tracker_goals})\n"
+            f"    ;   (_ad_log_msg(error, '{pred_name}', 'Goal Failed or Backtracked'), fail\n)"
+            f"    )"
+        )
+        return f"{head} :-\n    {instrumented_body}."
+    
+    elif stripped.endswith('.') and not stripped.startswith((':-', '%')):
+        # It's a plain Prolog fact. We append an verification step if it contains tracking signatures.
+        fact_content = stripped.rstrip('.')
+        pred_name = fact_content.split('(')[0].strip() if '(' in fact_content else fact_content
+        variables = extract_prolog_variables(fact_content)
+        
+        if variables:
+            var_trackers = ", ".join([f"_ad_trace_var('{pred_name}', '{var}', {var})" for var in variables])
+            return f"{fact_content} :-\n    _ad_init_logs, {var_trackers}."
+        
+    return clause
+
+def inject_into_prolog_file(file_path):
+    try:
+        with open(file_path, 'r', encoding='utf-8') as f:
+            raw_content = f.read()
+
+        # Split file by complete rules (assuming standard layout ending in a dot followed by newline or space)
+        # Note: A production-grade parser would use regex or a token-stream scanner, 
+        # but this mimics your pattern splitting reliably.
+        import re
+        raw_clauses = re.split(r'\.(?=\s|$)', raw_content)
+
+        transformed_clauses = []
+        for idx, clause in enumerate(raw_clauses):
+            if clause.strip():
+                transformed_clauses.append(instrument_prolog_clause(clause, idx))
+            else:
+                transformed_clauses.append(clause)
+
+        # Reconstruct file with the Prolog Engine runtime architecture header injection
+        new_content = [generate_prolog_header()] + ["\n".join(transformed_clauses)]
+        
+        with open(file_path, 'w', encoding='utf-8') as f:
+            f.write("\n".join(new_content))
+        return True
+    except Exception as e:
+        print(f"Prolog Instrumentation Error: {e}")
+        return False
+
+def process_prolog_project(source_dir):
+    target_dir = source_dir.rstrip('\\/') + f"_PROLOG_DEBUG_{int(time.time())}"
+    if not os.path.exists(target_dir):
+        os.makedirs(target_dir)
+        
+    print(f"\n[START] Building instrumented sandbox for Prolog codebases...")
+    for root, _, files in os.walk(source_dir):
+        if any(x in root for x in ['venv', '.git', '__pycache__']):
+            continue
+        for file in files:
+            if file.endswith((".pl", ".pro", ".P")):
+                src = os.path.join(root, file)
+                dst = os.path.join(target_dir, os.path.relpath(src, source_dir))
+                os.makedirs(os.path.dirname(dst), exist_ok=True)
+                shutil.copy2(src, dst)
+                inject_into_prolog_file(dst)
+                print(f"    Instrumented Prolog script: {file}")
+                
+    print(f"\n[FINISH] Safe sandbox created successfully at: {target_dir}")
+
+if __name__ == "__main__":
+    p = input("Prolog Project Directory Path: ").strip().strip('"')
+    if os.path.isdir(p):
+        process_prolog_project(p)
+    else:
+        print("Provided directory path is invalid.")
