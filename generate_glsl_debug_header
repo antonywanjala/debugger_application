@@ -1,0 +1,252 @@
+# -*- coding: utf-8 -*-
+# vim: expandtab tabstop=4 shiftwidth=4
+# -*- indent-tabs-mode: nil; tab-width: 4 -*-
+# ==============================================================================
+# STRICT RECURSIVE GLSL WRAPPER & STATE INSTRUMENTER (V1.0 - GLSL ADAPTATION)
+# ==============================================================================
+import csv
+import datetime as _dt
+import re
+import shutil
+import subprocess
+import time
+from pathlib import Path
+
+
+def generate_glsl_debug_header(stage="frag"):
+    """
+    Generates helper functions injected at the top of GLSL shaders
+    for visual state debugging and error bounds checking.
+    """
+    return f"""// ==========================================
+// INJECTED GLSL DEBUG HEADER ({stage.upper()})
+// ==========================================
+#ifndef _GLSL_DEBUG_HEADER_
+#define _GLSL_DEBUG_HEADER_
+
+// Helper: Maps a scalar float value to a heatmap color (Blue -> Green -> Red)
+vec4 _debug_visualize_float(float val, float min_val, float max_val) {{
+    float norm = clamp((val - min_val) / (max_val - min_val), 0.0, 1.0);
+    return vec4(norm, 1.0 - abs(norm - 0.5) * 2.0, 1.0 - norm, 1.0);
+}}
+
+// Helper: Visualizes a vec3 color with alpha 1.0
+vec4 _debug_visualize_vec3(vec3 v) {{
+    return vec4(v, 1.0);
+}}
+
+#endif // _GLSL_DEBUG_HEADER_
+// ==========================================
+"""
+
+
+def clean_non_breaking_spaces(content: str) -> str:
+    """Removes non-breaking space variants globally."""
+    return content.replace('\xa0', ' ').replace('\u00a0', ' ')
+
+
+def compile_with_glslang(shader_path: Path, stage: str = "frag") -> tuple[bool, str]:
+    """
+    Attempts to compile the GLSL file using glslangValidator.
+    Returns (success_boolean, compiler_output_message).
+    """
+    compiler = shutil.which("glslangValidator") or shutil.which("glslc")
+    if not compiler:
+        return True, "Compiler (glslangValidator/glslc) not found. Skipping static pass."
+
+    cmd = [compiler, str(shader_path)]
+    if "glslc" in compiler:
+        cmd = [compiler, f"-fshader-stage={stage}", str(shader_path), "-o", "NUL" if Path.os.name == 'nt' else "/dev/null"]
+
+    res = subprocess.run(cmd, capture_output=True, text=True)
+    success = res.returncode == 0
+    output = res.stdout if res.stdout else res.stderr
+    return success, output
+
+
+def instrument_glsl_file(file_path: Path, stage: str = "frag", max_depth: int = 3) -> bool:
+    """
+    Reads a GLSL shader, cleans formatting, injects state-tracking hooks,
+    and creates a debuggable variant.
+    """
+    try:
+        with open(file_path, 'r', encoding='utf-8') as f:
+            raw_content = f.read()
+
+        raw_content = clean_non_breaking_spaces(raw_content)
+        lines = raw_content.splitlines()
+
+        # Metadata parsing
+        in_block_comment = False
+        lines_meta = []
+
+        for line in lines:
+            stripped = line.strip()
+            line_starts_in_comment = in_block_comment
+
+            # Track multi-line comments /* ... */
+            i = 0
+            while i < len(line):
+                if in_block_comment:
+                    if line[i:i+2] == "*/":
+                        in_block_comment = False
+                        i += 2
+                        continue
+                    i += 1
+                else:
+                    if line[i:i+2] == "/*":
+                        in_block_comment = True
+                        i += 2
+                        continue
+                    i += 1
+
+            line_ends_in_comment = in_block_comment
+            is_comment = line_starts_in_comment or line_ends_in_comment or stripped.startswith("//")
+            lines_meta.append((line, is_comment))
+
+        transformed_lines = []
+        scope_depth = 0
+        version_line_idx = -1
+
+        # Preserve #version directive at the top
+        for idx, (line_text, is_comment) in enumerate(lines_meta):
+            stripped = line_text.strip()
+            if stripped.startswith("#version"):
+                version_line_idx = idx
+                break
+
+        # Regex for variable assignments: float x = 1.0; or x = y + 2.0;
+        assign_regex = re.compile(r'^\s*([a-zA-Z_][a-zA-Z0-9_]*)\s*=\s*(.+);$')
+        decl_assign_regex = re.compile(r'^\s*([a-zA-Z0-9_]+)\s+([a-zA-Z_][a-zA-Z0-9_]*)\s*=\s*(.+);$')
+
+        log_entries = []
+
+        for idx, (line_text, is_comment) in enumerate(lines_meta):
+            if idx == version_line_idx:
+                transformed_lines.append(line_text)
+                transformed_lines.append(generate_glsl_debug_header(stage))
+                continue
+
+            content_part = line_text.lstrip(' \t')
+            raw_indent = line_text[:len(line_text) - len(content_part)]
+            total_space_weight = raw_indent.count(' ') + (raw_indent.count('\t') * 4)
+            indent_level = max(0, total_space_weight // 4)
+            indent_str = '    ' * indent_level
+
+            normalized_line = indent_str + content_part
+
+            if not content_part.strip() or is_comment or content_part.startswith("#"):
+                transformed_lines.append(normalized_line)
+                continue
+
+            # Scope tracking
+            scope_depth += content_part.count('{') - content_part.count('}')
+
+            # Instrument variable assignments within allowed depth
+            m_decl = decl_assign_regex.match(content_part)
+            m_assign = assign_regex.match(content_part)
+
+            if (m_decl or m_assign) and scope_depth <= max_depth:
+                var_type = m_decl.group(1) if m_decl else "existing"
+                var_name = m_decl.group(2) if m_decl else m_assign.group(1)
+                line_no = idx + 1
+
+                transformed_lines.append(normalized_line)
+
+                # Inject debug conditional macro comment for visual state inspection
+                debug_hook = (
+                    f"{indent_str}// [DEBUG_STATE Line {line_no}] Variable '{var_name}'\n"
+                    f"{indent_str}#ifdef DEBUG_VAR_{var_name.upper()}\n"
+                    f"{indent_str}    fragColor = vec4(vec3({var_name}), 1.0);\n"
+                    f"{indent_str}    return;\n"
+                    f"{indent_str}#endif"
+                )
+                transformed_lines.append(debug_hook)
+
+                log_entries.append((line_no, var_name, var_type))
+            else:
+                transformed_lines.append(normalized_line)
+
+        # Write out debug-instrumented GLSL script
+        new_content = "\n".join(transformed_lines) + "\n"
+        with open(file_path, 'w', encoding='utf-8') as f:
+            f.write(new_content)
+
+        # Export tracked variable map to CSV
+        csv_path = file_path.parent / "_GLSL_VARIABLE_TRACKER.csv"
+        with open(csv_path, 'a', encoding='utf-8', newline='') as f:
+            writer = csv.writer(f)
+            for entry in log_entries:
+                writer.writerow([file_path.name, entry[0], entry[1], entry[2]])
+
+        return True
+    except Exception as e:
+        print(f"GLSL Injection Error on {file_path.name}: {e}")
+        return False
+
+
+def process_glsl_project(source_dir: str, max_depth: int = 3, stage: str = "frag"):
+    """
+    Copies the target directory to a safe debug sandbox, instruments all GLSL files,
+    and runs static compilation tests against each.
+    """
+    source_path = Path(source_dir)
+    target_dir = source_path.parent / f"{source_path.name}_GLSL_DEBUG_{int(time.time())}"
+    target_dir.mkdir(parents=True, exist_ok=True)
+
+    print(f"\n[START] Building instrumented GLSL project layout at: {target_dir}")
+
+    # Reset project-wide CSV tracker
+    csv_tracker = target_dir / "_GLSL_VARIABLE_TRACKER.csv"
+    with open(csv_tracker, 'w', encoding='utf-8', newline='') as f:
+        writer = csv.writer(f)
+        writer.writerow(["File", "Line", "Variable", "DeclaredType"])
+
+    glsl_extensions = {".glsl", ".frag", ".vert", ".geom", ".comp", ".tesc", ".tese"}
+
+    for root, _, files in Path.walk(source_path):
+        rel_root = Path(root).relative_to(source_path)
+        dest_root = target_dir / rel_root
+        dest_root.mkdir(parents=True, exist_ok=True)
+
+        for file_name in files:
+            src_file = Path(root) / file_name
+            dst_file = dest_root / file_name
+
+            shutil.copy2(src_file, dst_file)
+
+            if src_file.suffix.lower() in glsl_extensions:
+                # Infer stage from extension if applicable
+                file_stage = stage
+                if src_file.suffix == ".vert": file_stage = "vert"
+                elif src_file.suffix == ".frag": file_stage = "frag"
+                elif src_file.suffix == ".comp": file_stage = "comp"
+
+                instrument_glsl_file(dst_file, stage=file_stage, max_depth=max_depth)
+                success, output = compile_with_glslang(dst_file, stage=file_stage)
+
+                status = "[PASS]" if success else "[FAIL]"
+                print(f"    Instrumented & Tested {status}: {file_name}")
+
+                if not success:
+                    log_file = target_dir / "_GLSL_COMPILE_ERRORS.txt"
+                    with open(log_file, "a", encoding="utf-8") as f_err:
+                        f_err.write(f"--- ERROR IN {file_name} ({_dt.datetime.now()}) ---\n")
+                        f_err.write(output + "\n\n")
+
+    print(f"\n[FINISH] Safe GLSL sandbox initialized at: {target_dir}")
+
+
+if __name__ == "__main__":
+    p = input("GLSL Project Path: ").strip().strip('"')
+    try:
+        d = int(input("Max Nesting Depth for Hooks (default 3): ").strip() or 3)
+    except ValueError:
+        d = 3
+
+    stg = input("Default Shader Stage (frag/vert/comp, default 'frag'): ").strip().lower() or "frag"
+
+    if Path(p).is_dir():
+        process_glsl_project(p, max_depth=d, stage=stg)
+    else:
+        print("Invalid directory path.")
