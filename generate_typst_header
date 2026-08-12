@@ -1,0 +1,138 @@
+import os
+import re
+import shutil
+import time
+
+def generate_typst_header():
+    """Generates debugging utility functions for Typst."""
+    return """// ==========================================
+// TYPST DEBUG & STATE TRACKER HEADER
+// ==========================================
+
+#let __debug_active = true
+
+// Logs a message directly in the rendered output with a highlighted badge
+#let debug-log(label, value) = {
+    if __debug_active [
+        #block(
+            fill: rgb("#fff3cd"),
+            stroke: rgb("#ffeba2"),
+            inset: 6pt,
+            radius: 4pt,
+            width: 100%,
+            [
+                #text(weight: "bold", fill: rgb("#856404"))[[DEBUG - #label]] \
+                #text(font: "monospace", size: 8pt)[#repr(value)]
+            ]
+        )
+    ]
+}
+
+// Emits invisible state data into the Typst introspection graph
+#let trace-state(loc-id, state-data) = {
+    metadata((location: loc-id, payload: state-data))
+}
+
+// ==========================================
+"""
+
+def inject_into_typst_file(file_path):
+    try:
+        with open(file_path, 'r', encoding='utf-8') as f:
+            raw_content = f.read()
+
+        # Clean non-breaking space variants
+        raw_content = raw_content.replace('\xa0', ' ').replace('\u00a0', ' ')
+        raw_lines = raw_content.splitlines()
+
+        transformed_lines = []
+        in_code_block = False
+        in_raw_block = False
+
+        for idx, line in enumerate(raw_lines):
+            line_no = idx + 1
+            stripped = line.strip()
+
+            # Track raw text / code block states (```typst ... ```)
+            if stripped.startswith("```"):
+                in_raw_block = not in_raw_block
+                transformed_lines.append(line)
+                continue
+
+            if in_raw_block or not stripped:
+                transformed_lines.append(line)
+                continue
+
+            # 1. Instrument variable let-bindings inside code mode or block mode
+            # Example: #let my_var = "value" -> #let my_var = "value"; #trace-state(...)
+            let_match = re.match(r'^(\s*)(#?let\s+([a-zA-Z0-9_\-]+)\s*=.*)$', line)
+            if let_match:
+                indent, full_stmt, var_name = let_match.groups()
+                transformed_lines.append(line)
+                # Inject a metadata state tracker right after the definition
+                transformed_lines.append(
+                    f'{indent}#trace-state("Line {line_no}: {var_name}", {var_name})'
+                )
+                continue
+
+            # 2. Instrument function definitions
+            # Example: #let my_func(a, b) = { ... }
+            fn_match = re.match(r'^(\s*)(#?let\s+([a-zA-Z0-9_\-]+)\((.*?)\)\s*=\s*\{?)$', line)
+            if fn_match:
+                indent, full_stmt, fn_name, fn_args = fn_match.groups()
+                transformed_lines.append(line)
+                transformed_lines.append(
+                    f'{indent}  #debug-log("FN CALL: {fn_name}", ({fn_args}))'
+                )
+                continue
+
+            transformed_lines.append(line)
+
+        # Attach standard debug header at the top
+        new_content = [generate_typst_header()] + transformed_lines
+        with open(file_path, 'w', encoding='utf-8') as f:
+            f.write("\n".join(new_content) + "\n")
+        return True
+
+    except Exception as e:
+        print(f"Injection Error in {file_path}: {e}")
+        return False
+
+
+def process_typst_project(source_dir):
+    target_dir = source_dir.rstrip('\\/') + f"_TYPST_DEBUG_{int(time.time())}"
+    if not os.path.exists(target_dir):
+        os.makedirs(target_dir)
+
+    print(f"\n[START] Building instrumented Typst project sandbox...")
+
+    for root, _, files in os.walk(source_dir):
+        # Ignore common build folders
+        if any(x in root for x in ['.git', 'build', 'target']):
+            continue
+
+        for file in files:
+            if file.endswith(".typ"):
+                src = os.path.join(root, file)
+                dst = os.path.join(target_dir, os.path.relpath(src, source_dir))
+                os.makedirs(os.path.dirname(dst), exist_ok=True)
+                shutil.copy2(src, dst)
+                
+                inject_into_typst_file(dst)
+                print(f"    Instrumented: {file}")
+
+    print(f"\n[FINISH] Typst debug project created at: {target_dir}")
+
+
+if __name__ == "__main__":
+    path = input("Typst Project Path: ").strip().strip('"')
+    if os.path.isdir(path):
+        process_typst_project(path)
+    elif os.path.isfile(path) and path.endswith('.typ'):
+        # Single file execution support
+        target_file = path.replace('.typ', f'_debug_{int(time.time())}.typ')
+        shutil.copy2(path, target_file)
+        inject_into_typst_file(target_file)
+        print(f"\n[FINISH] Instrumented single file at: {target_file}")
+    else:
+        print("Invalid directory or Typst file path.")
